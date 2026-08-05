@@ -72,6 +72,11 @@ def set_speed_profile(device, channel: str, profile: list[tuple[int, int]]) -> N
         handle.set_speed_profile(channel, profile)
 
 
+# Colour byte order: control_hub.py writes [g, r, b] with a `# GRB order`
+# comment, which looks like a red/green transposition bug. It is not -- the
+# hardware really is GRB, and requesting red on an F240 RGB Core produces red.
+# Verified on hardware by capturing the wire bytes and checking the result; do
+# not "fix" this by pre-swapping R and G, which transposes them for real.
 def set_color(
     device,
     channel: str,

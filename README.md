@@ -17,8 +17,8 @@ fanctl led set ring fading ff0000 0000ff --speed faster
 fanctl led set ring off
 
 fanctl lcd brightness 80
-fanctl lcd image ~/pic.png
 fanctl lcd liquid
+fanctl lcd image ~/pic.png                # BROKEN on this firmware, see below
 ```
 
 Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
@@ -50,13 +50,34 @@ installed drivers, so a liquidctl upgrade that closes a gap shows up immediately
 - **Kraken 2024 Elite RGB** — `<serial>`, `/dev/hidraw14`. Pump plus a
   light ring. Its own `fan` channel is empty; radiator fans are on the hub.
 - **Control Hub** — `<serial>`, `/dev/hidraw2`.
-  Channels 1, 3 and 5 are empty.
-  - `fan2`/`led2` — F240 RGB Core, **on the AIO radiator**. Confirmed visually.
-    Keep the duty floor on this channel and tie it to liquid temperature.
-  - `fan4`/`led4` — F360 RGB Core, case fans. Free to run quieter.
+  Channels 1, 3 and 5 are empty. Both fan groups are wired here, not to the
+  Kraken.
+  - `fan2`/`led2` — F240 RGB Core, **on the AIO radiator, exhaust**. Keep the
+    duty floor on this channel and tie it to liquid temperature.
+  - `fan4`/`led4` — F360 RGB Core, **front intake**. Free to run quieter, and a
+    reasonable candidate for a CPU- or ambient-driven curve rather than liquid.
+
+The AIO's own bundled PWM fans are not in use, which is why the Kraken's `fan`
+channel reads 0 rpm. Nothing should ever be scheduled onto it.
 
 Zone 0 on the Kraken is the pump light ring — confirmed visually, and it is the
 only populated zone on that device.
+
+## The LCD
+
+`set_screen` accepts exactly five modes on this product: `liquid`, `brightness`,
+`orientation`, `static` and `gif`. **`liquid` is the only built-in stat
+readout** — the firmware has no CPU or GPU widget. When NZXT CAM displays those,
+it is rendering frames on the host and uploading them, so showing anything other
+than liquid temperature means generating 640×640 images ourselves.
+
+**`lcd image` does not work on this unit** (Kraken 2024 Elite, firmware 1.2.0).
+The upload returns success but the panel shows black with a small underscore;
+`fanctl lcd liquid` recovers it. liquidctl gates its RGB565 upload path
+(`_prepare_static_file_rgb16`) on product `0x300E` with firmware major 2, so
+`0x3012` takes the older RGBA path, which is the prime suspect. Untested
+hypothesis — do not trust `lcd image` or `lcd gif` until this is resolved, and
+note that host-rendered stat frames depend on it.
 
 ## Safety floors
 
