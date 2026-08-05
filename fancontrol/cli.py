@@ -329,9 +329,11 @@ def cmd_lcd(args) -> int:
             print(f"error: no such file: {path}", file=sys.stderr)
             return 2
         value = str(path)
-        # liquidctl marks LCD upload unstable and it goes over a bulk endpoint
-        # rather than hidraw, so it is the most failure-prone write we make.
-        mode = "static" if mode == "static" else "gif"
+        # Upload goes over a bulk endpoint rather than hidraw, and upstream is
+        # explicit that a device must be initialised before being written to.
+        # A partial first upload here rendered only the centre of the image, so
+        # initialise defensively -- it is cheap next to a 1.6 MB transfer.
+        liquidctl_be.initialize(target.device)
     elif mode == "brightness":
         value = str(args.value)
         if not 0 <= int(args.value) <= 100:

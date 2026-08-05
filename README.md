@@ -18,7 +18,7 @@ fanctl led set ring off
 
 fanctl lcd brightness 80
 fanctl lcd liquid
-fanctl lcd image ~/pic.png                # BROKEN on this firmware, see below
+fanctl lcd image ~/pic.png                # 640x640; initialises the device first
 ```
 
 Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
@@ -71,13 +71,27 @@ readout** — the firmware has no CPU or GPU widget. When NZXT CAM displays thos
 it is rendering frames on the host and uploading them, so showing anything other
 than liquid temperature means generating 640×640 images ourselves.
 
-**`lcd image` does not work on this unit** (Kraken 2024 Elite, firmware 1.2.0).
-The upload returns success but the panel shows black with a small underscore;
-`fanctl lcd liquid` recovers it. liquidctl gates its RGB565 upload path
-(`_prepare_static_file_rgb16`) on product `0x300E` with firmware major 2, so
-`0x3012` takes the older RGBA path, which is the prime suspect. Untested
-hypothesis — do not trust `lcd image` or `lcd gif` until this is resolved, and
-note that host-rendered stat frames depend on it.
+`lcd image` **works** on this unit (Kraken 2024 Elite, firmware 1.2.0), verified
+with a full-screen four-quadrant test pattern: all quadrants and a border at the
+extreme edges rendered, so there is no cropping or scaling loss. Host-rendered
+stat frames are therefore viable.
+
+Two things worth knowing before you debug this path:
+
+- **`fanctl lcd image` initialises the device first.** Upstream is explicit that
+  devices must be initialised before being written to, and an early upload here
+  rendered only the centre of the image. The init is cheap next to a 1.6 MB
+  transfer.
+- **Test with a bright, full-bleed image.** A dark image with fine detail is a
+  terrible diagnostic — it is genuinely hard to tell a failed upload from a
+  correctly rendered dark image. `_setup_bucket` and `_switch_bucket` only
+  `_LOGGER.error` on failure and never raise, so a zero exit code proves
+  nothing about what reached the panel.
+
+Do not "fix" this by forcing liquidctl's RGB565 path
+(`_prepare_static_file_rgb16` + `_send_2023_data_fw2`), which upstream gates on
+product `0x300E` with firmware major 2. On `0x3012` it produces a black screen;
+the default RGBA path is correct.
 
 ## Safety floors
 
