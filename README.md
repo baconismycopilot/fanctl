@@ -19,6 +19,11 @@ fanctl led set ring off
 fanctl lcd brightness 80
 fanctl lcd liquid
 fanctl lcd image ~/pic.png                # 640x640; initialises the device first
+
+fanctl config init                     # starter config from discovered hardware
+fanctl profile list
+fanctl apply balanced --dry-run         # show what would change, touch nothing
+fanctl apply balanced
 ```
 
 Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
@@ -62,6 +67,47 @@ channel reads 0 rpm. Nothing should ever be scheduled onto it.
 
 Zone 0 on the Kraken is the pump light ring — confirmed visually, and it is the
 only populated zone on that device.
+
+## Profiles
+
+`~/.config/fanctl/config.toml` holds named profiles — whole-machine states
+covering fan duties, a pump curve, lighting on both backends, and the LCD.
+`fanctl config init` writes a starter file from whatever is actually plugged in,
+skipping empty headers.
+
+Channel aliases are the point of the file:
+
+```toml
+[channels]
+radiator = "hub:2"     # F240, exhaust over the radiator
+intake   = "hub:4"     # F360, front intake
+ring     = "ring"
+```
+
+The numeric shorthand is deliberate: `hub:2` resolves to `fan2` in a `fans`
+block and `led2` in a `led` block, so one alias names the physical thing once
+and serves both. The device cannot tell you what a fan is bolted to, so this is
+where that knowledge lives.
+
+A fan takes either a fixed duty or a curve:
+
+```toml
+[profiles.balanced.fans]
+radiator = { curve = [[30, 30], [40, 70]], source = "liquid" }
+intake   = 40
+```
+
+Curves are accepted in config today but **the Control Hub cannot run them** — it
+has no device-side curve support, so they need the daemon. `apply` reports each
+one it had to skip rather than silently doing less than the config asks:
+
+```
+skipped: hub:fan2 curve needs the daemon (no device-side curve support)
+skipped: kraken:pump curve wants 'cpu' but the device can only follow 'liquid'
+```
+
+The pump's own curve runs on the cooler and works today. Use `--dry-run` before
+trusting a new profile, and `--force` to override the duty floors.
 
 ## The LCD
 
@@ -146,10 +192,13 @@ stays NZXT-only and ships as a `systemctl --user` service.
 
 ## Status
 
-Phases 0-2 complete: contention cleared, read-only enumeration, and writes for
-fans, pump, on-device pump curve, both lighting backends, and the LCD.
+Phases 0-3 complete: contention cleared, read-only enumeration, writes across
+every writable surface, and TOML profiles with `apply`.
 
-Not yet built: TOML profiles and `apply` (phase 3), and the curve daemon with
-its systemd unit and resume hook (phase 4). Until the daemon exists, hub fans
-hold whatever fixed duty you last set — nothing is temperature-reactive except
-the pump's on-device curve.
+Not yet built: the curve daemon with its systemd unit and resume hook (phase 4).
+Until it exists, hub fans hold whatever fixed duty you last set — nothing is
+temperature-reactive except the pump's on-device liquid curve — and nothing
+survives a power cycle, so `fanctl apply <profile>` has to be re-run.
+
+Phase 4 also brings `lcd.mode = "stats"`: host-rendered 640×640 frames showing
+CPU and GPU temperature, since the firmware has no widget for either.

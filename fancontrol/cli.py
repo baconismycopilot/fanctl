@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__
 from . import caps as caps_mod
 from . import colors as color_mod
+from . import config as cfg_mod
 from . import devices as dev_mod
 from . import targets as target_mod
 from .backends import liquidctl_be, openrgb_be
@@ -230,18 +231,25 @@ def cmd_led_set(args) -> int:
         return 2
 
     parsed_colors = [color_mod.parse_color(c) for c in args.colors]
+    return apply_led(target, mode, parsed_colors, args.speed, args.direction)
+
+
+def apply_led(target, mode: str, parsed_colors, speed: str, direction: str, indent: str = "") -> int:
+    """Route a lighting request to whichever backend owns the channel."""
     backend = target.caps.backend_for_color(target.channel)
 
     if backend is caps_mod.Backend.OPENRGB:
-        return _led_via_openrgb(target, mode, parsed_colors, args)
+        return _led_via_openrgb(target, mode, parsed_colors, speed, direction, indent)
     if backend is caps_mod.Backend.LIQUIDCTL:
-        return _led_via_liquidctl(target, mode, parsed_colors, args)
+        return _led_via_liquidctl(target, mode, parsed_colors, speed, direction, indent)
 
     print(f"error: {target} has no colour control on any backend", file=sys.stderr)
     return 2
 
 
-def _led_via_liquidctl(target, mode: str, parsed_colors, args) -> int:
+def _led_via_liquidctl(
+    target, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
+) -> int:
     available = caps_mod.liquidctl_modes(target.device)
     if mode not in available:
         print(
@@ -257,14 +265,16 @@ def _led_via_liquidctl(target, mode: str, parsed_colors, args) -> int:
         target.channel,
         native,
         parsed_colors,
-        speed=args.speed,
-        direction=args.direction,
+        speed=speed,
+        direction=direction,
     )
-    print(f"{target}  {mode}{_fmt_colors(parsed_colors)}  {_style('[liquidctl]', DIM)}")
+    print(f"{indent}{target}  {mode}{_fmt_colors(parsed_colors)}  {_style('[liquidctl]', DIM)}")
     return 0
 
 
-def _led_via_openrgb(target, mode: str, parsed_colors, args) -> int:
+def _led_via_openrgb(
+    target, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
+) -> int:
     try:
         client = openrgb_be.connect()
     except openrgb_be.OpenRGBUnavailable as exc:
@@ -287,8 +297,8 @@ def _led_via_openrgb(target, mode: str, parsed_colors, args) -> int:
         return 2
 
     native = color_mod.canonical_for_openrgb(mode)  # None for 'off'
-    speed_idx = color_mod.ANIMATION_SPEEDS.index(args.speed)
-    direction_idx = color_mod.DIRECTIONS.index(args.direction)
+    speed_idx = color_mod.ANIMATION_SPEEDS.index(speed)
+    direction_idx = color_mod.DIRECTIONS.index(direction)
 
     try:
         openrgb_be.set_ring(client, ring, native, parsed_colors, speed_idx, direction_idx)
@@ -296,7 +306,7 @@ def _led_via_openrgb(target, mode: str, parsed_colors, args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"{target}  {mode}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
+    print(f"{indent}{target}  {mode}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
     return 0
 
 
@@ -352,6 +362,221 @@ def cmd_lcd(args) -> int:
 
 
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# profiles
+
+
+def cmd_config_init(args) -> int:
+    path = cfg_mod.config_path()
+    if path.exists() and not args.force:
+        print(f"error: {path} already exists; pass --force to overwrite", file=sys.stderr)
+        return 2
+
+    found = dev_mod.discover()
+    if not found:
+        print("no supported NZXT devices found", file=sys.stderr)
+        return 1
+
+    channels: list[dict] = []
+    has_lcd = False
+    has_pump = False
+
+    for device in found:
+        caps = caps_mod.inspect_device(device)
+        has_lcd = has_lcd or caps.screen
+        has_pump = has_pump or "pump" in caps.speed_channels
+
+        # Only emit channels with something attached. Reading rpm is the only
+        # way to tell: the hub reports every header whether or not a fan is on
+        # it, and a duty written to an empty header does nothing.
+        populated: set[str] = set()
+        try:
+            for reading in liquidctl_be.read_status(device):
+                if reading.unit == "rpm" and reading.value:
+                    populated.add(reading.key.rsplit(" ", 1)[0].strip().lower().replace(" ", ""))
+        except Exception:  # noqa: BLE001 - degrade to emitting nothing per device
+            continue
+
+        # Index by channel number so a fan and its lighting share one alias.
+        # 'hub:2' resolves to fan2 in a fans block and led2 in a led block.
+        for channel in caps.speed_channels:
+            if channel == "pump":  # has its own profile section, not an alias
+                continue
+            if channel not in populated:
+                continue
+            number = channel.removeprefix("fan")
+            channels.append(
+                {
+                    "label": f"{device.alias}_{number}",
+                    "target": f"{device.alias}:{number}",
+                    "fan": True,
+                    "led": f"led{number}" in caps.color_channels,
+                }
+            )
+
+        if caps.ring_zone is not None:
+            channels.append({"label": "ring", "target": "ring", "fan": False, "led": True})
+
+    text = cfg_mod.generate_starter(channels, has_pump, has_lcd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    print(f"wrote {path}")
+    print(_style("  rename the channel aliases to something physical, then:", DIM))
+    print(_style("  fanctl apply balanced --dry-run", DIM))
+    return 0
+
+
+def cmd_profile_list(args) -> int:
+    config = cfg_mod.load()
+    width = max(len(n) for n in config.profiles)
+    for name, profile in config.profiles.items():
+        print(f"{name:<{width}}  {_style(profile.description, DIM)}")
+    return 0
+
+
+def cmd_profile_show(args) -> int:
+    config = cfg_mod.load()
+    profile = config.profiles.get(args.name)
+    if profile is None:
+        known = ", ".join(config.profiles)
+        print(f"error: no profile {args.name!r} (known: {known})", file=sys.stderr)
+        return 2
+
+    print(f"{_style(profile.name, BOLD)}  {_style(profile.description, DIM)}")
+    for fan in profile.fans:
+        detail = f"{fan.duty}%" if fan.duty is not None else f"curve ({fan.source}) {fan.curve}"
+        print(f"  fan  {fan.label:<12} {detail}")
+    if profile.pump:
+        pump = profile.pump
+        detail = f"{pump.duty}%" if pump.duty is not None else f"curve ({pump.source}) {pump.curve}"
+        print(f"  pump {'':<12} {detail}")
+    for led in profile.leds:
+        colors = " ".join(led.colors)
+        print(f"  led  {led.label:<12} {led.mode} {colors}".rstrip())
+    if profile.lcd:
+        lcd = profile.lcd
+        bits = [f"{k}={v}" for k, v in vars(lcd).items() if v is not None]
+        print(f"  lcd  {'':<12} {' '.join(bits)}")
+    return 0
+
+
+def _apply_speed(target, setting, dry_run: bool, kind: str, force: bool) -> tuple[int, list[str]]:
+    """Apply one fan or pump setting. Returns (failures, skipped-messages)."""
+    skipped: list[str] = []
+
+    if setting.duty is not None:
+        _check_duty(kind, setting.duty, force)
+        if dry_run:
+            print(f"  would set {target}  duty -> {setting.duty}%")
+        else:
+            liquidctl_be.set_fixed_speed(target.device, target.channel, setting.duty)
+            print(f"  {target}  duty -> {setting.duty}%")
+        return 0, skipped
+
+    for _, duty in setting.curve:
+        _check_duty(kind, duty, force)
+
+    if not target.caps.speed_profile:
+        skipped.append(
+            f"{target} curve needs the daemon (no device-side curve support)"
+        )
+        return 0, skipped
+
+    if setting.source != (target.caps.profile_temp_source or "liquid"):
+        skipped.append(
+            f"{target} curve wants '{setting.source}' but the device can only "
+            f"follow '{target.caps.profile_temp_source}'; needs the daemon"
+        )
+        return 0, skipped
+
+    shown = "  ".join(f"{t}C:{d}%" for t, d in setting.curve)
+    if dry_run:
+        print(f"  would set {target}  curve -> {shown}")
+    else:
+        liquidctl_be.set_speed_profile(target.device, target.channel, setting.curve)
+        print(f"  {target}  curve -> {shown}  ({setting.source}, on-device)")
+    return 0, skipped
+
+
+def cmd_apply(args) -> int:
+    config = cfg_mod.load()
+    profile = config.profiles.get(args.name)
+    if profile is None:
+        known = ", ".join(config.profiles)
+        print(f"error: no profile {args.name!r} (known: {known})", file=sys.stderr)
+        return 2
+
+    found = dev_mod.discover()
+    if not found:
+        print("no supported NZXT devices found", file=sys.stderr)
+        return 1
+
+    label = f"{profile.name}" + (" (dry run)" if args.dry_run else "")
+    print(f"{_style(label, BOLD)}  {_style(profile.description, DIM)}")
+
+    failures = 0
+    skipped: list[str] = []
+
+    # Pump first: if anything below fails, the loop is already moving.
+    if profile.pump:
+        target = target_mod.sole_device_with(
+            found, lambda c: "pump" if "pump" in c.speed_channels else None, "a pump channel"
+        )
+        f, s = _apply_speed(target, profile.pump, args.dry_run, "pump", args.force)
+        failures += f
+        skipped += s
+
+    for fan in profile.fans:
+        target = target_mod.resolve(found, fan.channel, "fan")
+        f, s = _apply_speed(target, fan, args.dry_run, "fan", args.force)
+        failures += f
+        skipped += s
+
+    for led in profile.leds:
+        target = target_mod.resolve(found, led.channel, "led")
+        colors = [color_mod.parse_color(c) for c in led.colors]
+        if args.dry_run:
+            print(f"  would set {target}  {led.mode}{_fmt_colors(colors)}")
+            continue
+        if apply_led(target, led.mode, colors, led.speed, led.direction, indent="  "):
+            failures += 1
+
+    if profile.lcd:
+        failures += _apply_lcd(found, profile.lcd, args.dry_run)
+
+    if skipped:
+        print()
+        for note in skipped:
+            print(_style(f"  skipped: {note}", DIM))
+
+    return 1 if failures else 0
+
+
+def _apply_lcd(found, lcd, dry_run: bool) -> int:
+    target = _lcd_target(found)
+    steps: list[tuple[str, str | None]] = []
+    if lcd.brightness is not None:
+        steps.append(("brightness", str(lcd.brightness)))
+    if lcd.orientation is not None:
+        steps.append(("orientation", str(lcd.orientation)))
+    if lcd.mode == "liquid":
+        steps.append(("liquid", None))
+    elif lcd.mode == "image":
+        steps.append(("static", str(Path(lcd.path).expanduser())))
+    elif lcd.mode == "stats":
+        print(_style("  skipped: lcd mode 'stats' needs the daemon", DIM))
+
+    for mode, value in steps:
+        if dry_run:
+            print(f"  would set {target.device.alias}:lcd  {mode}{' ' + value if value else ''}")
+            continue
+        if mode == "static":
+            liquidctl_be.initialize(target.device)
+        liquidctl_be.set_screen(target.device, mode, value)
+        print(f"  {target.device.alias}:lcd  {mode}{' ' + value if value else ''}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -430,6 +655,31 @@ def build_parser() -> argparse.ArgumentParser:
     p = lcd_sub.add_parser("liquid", help="show the built-in liquid temperature readout")
     p.set_defaults(func=cmd_lcd, lcd_mode="liquid", value=None)
 
+    # config / profiles
+    p_config = sub.add_parser("config", help="manage the configuration file")
+    config_sub = p_config.add_subparsers(dest="config_command", required=True)
+    p = config_sub.add_parser("init", help="write a starter config from discovered hardware")
+    p.add_argument("--force", action="store_true", help="overwrite an existing config")
+    p.set_defaults(func=cmd_config_init)
+    p = config_sub.add_parser("path", help="print the config file path")
+    p.set_defaults(func=lambda a: (print(cfg_mod.config_path()), 0)[1])
+
+    p_profile = sub.add_parser("profile", help="inspect configured profiles")
+    profile_sub = p_profile.add_subparsers(dest="profile_command", required=True)
+    p = profile_sub.add_parser("list", help="list profiles")
+    p.set_defaults(func=cmd_profile_list)
+    p = profile_sub.add_parser("show", help="show one profile in detail")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_profile_show)
+
+    p = sub.add_parser("apply", help="apply a named profile to every device")
+    p.add_argument("name")
+    p.add_argument(
+        "--dry-run", action="store_true", help="print what would change without touching hardware"
+    )
+    p.add_argument("--force", action="store_true", help="ignore the safety duty floors")
+    p.set_defaults(func=cmd_apply)
+
     return parser
 
 
@@ -441,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
     except (dev_mod.DeviceError, target_mod.TargetError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except (caps_mod.FloorError, color_mod.ColorError, ValueError) as exc:
+    except (caps_mod.FloorError, color_mod.ColorError, cfg_mod.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except TimeoutError as exc:
