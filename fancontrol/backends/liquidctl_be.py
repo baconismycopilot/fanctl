@@ -48,3 +48,42 @@ def read_status(device) -> list[Reading]:
     with opened(device) as handle:
         raw = handle.get_status()
     return [Reading(key=k, value=v, unit=u) for k, v, u in raw]
+
+
+def initialize(device) -> list[Reading]:
+    """Initialise a device and report what it found.
+
+    Required after a cold boot or a hardware change before LED accessories are
+    addressable, and the only way to learn which accessory sits on which channel.
+    """
+    with opened(device) as handle:
+        raw = handle.initialize()
+    return [Reading(key=k, value=v, unit=u) for k, v, u in (raw or [])]
+
+
+def set_fixed_speed(device, channel: str, duty: int) -> None:
+    with opened(device) as handle:
+        handle.set_fixed_speed(channel, duty)
+
+
+def set_speed_profile(device, channel: str, profile: list[tuple[int, int]]) -> None:
+    """Write a device-side duty curve. Only the Kraken supports this."""
+    with opened(device) as handle:
+        handle.set_speed_profile(channel, profile)
+
+
+def set_color(
+    device,
+    channel: str,
+    mode: str,
+    colors: list[list[int]],
+    speed: str = "normal",
+    direction: str = "forward",
+) -> None:
+    with opened(device) as handle:
+        handle.set_color(channel, mode, colors, speed=speed, direction=direction)
+
+
+def set_screen(device, mode: str, value: str | None) -> None:
+    with opened(device) as handle:
+        handle.set_screen("lcd", mode, value)

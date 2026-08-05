@@ -27,17 +27,37 @@ class Backend(str, Enum):
     NONE = "none"
 
 
+# Policy duty floors, enforced above whatever the driver itself allows.
+#
+# These guard against a mistyped duty ("5" for "50") quietly starving the loop,
+# which is silent until the liquid temperature has already climbed. They are
+# policy, not hardware limits -- liquidctl permits a 20% pump -- so `--force`
+# overrides them for anyone who means it.
+PUMP_FLOOR = 30
+FAN_FLOOR = 20
+
+
+def duty_floor(channel: str) -> int:
+    return PUMP_FLOOR if channel == "pump" else FAN_FLOOR
+
+
+class FloorError(ValueError):
+    """A requested duty fell below the policy floor."""
+
+
 @dataclass
 class Capabilities:
     """What a device can actually do, and which backend gets it done."""
 
     speed_channels: list[str] = field(default_factory=list)
     color_channels: list[str] = field(default_factory=list)
+    speed_sync: bool = False  # driver accepts a 'sync' pseudo-channel for duty
     speed_profile: bool = False  # device-side curve, no daemon required
     profile_temp_source: str | None = None
     screen: bool = False
     ring_zone: int | None = None  # via OpenRGB, when liquidctl has no LED channel
     ring_leds: int = 0
+    ring_modes: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
 
     def backend_for_color(self, channel: str) -> Backend:
@@ -82,6 +102,11 @@ def inspect_device(device) -> Capabilities:
 
     caps.speed_channels = sorted(getattr(handle, "_speed_channels", {}) or {})
     caps.color_channels = sorted(getattr(handle, "_color_channels", {}) or {})
+
+    # Only _BaseSmartDevice's set_fixed_speed understands 'sync'; the Kraken
+    # overrides it and would raise KeyError. Syncing a pump to a fan duty would
+    # be meaningless there anyway.
+    caps.speed_sync = _is_base_impl(cls, "set_fixed_speed", _BaseSmartDevice)
 
     caps.speed_profile = not _is_base_impl(cls, "set_speed_profile", _BaseSmartDevice)
     if caps.speed_profile and issubclass(cls, KrakenX3):
@@ -131,3 +156,38 @@ def enrich_with_openrgb(device, caps: Capabilities, ring) -> None:
     """Fold live OpenRGB zone data into an already-derived Capabilities."""
     if ring is not None:
         caps.ring_leds = ring.leds
+        caps.ring_modes = sorted(_canonical_modes(ring.modes, "openrgb"))
+
+
+def _canonical_modes(backend_names, backend: str) -> list[str]:
+    """Translate backend mode spellings back into canonical fanctl names."""
+    from .colors import MODES
+
+    available = {str(n).strip().lower() for n in backend_names}
+    out = []
+    for canonical, spec in MODES.items():
+        native = spec.liquidctl if backend == "liquidctl" else spec.openrgb
+        if native and native.strip().lower() in available:
+            out.append(canonical)
+    return out
+
+
+def liquidctl_modes(device) -> list[str]:
+    """Canonical modes this device's liquidctl driver actually implements.
+
+    Read from the driver's own `_COLOR_MODES` table rather than assumed: the
+    Control Hub implements six animations where older HUE 2 controllers
+    implement thirty, and hardcoding either number would be wrong somewhere.
+    """
+    table = getattr(type(device.handle), "_COLOR_MODES", None)
+    if not table:
+        return []
+    return sorted(_canonical_modes(table.keys(), "liquidctl"))
+
+
+def modes_for(device, caps: Capabilities, channel: str) -> list[str]:
+    """Modes available on a specific channel, accounting for its backend."""
+    if channel == "ring":
+        # 'off' is emulated as a black Static write; the ring exposes no Off mode.
+        return sorted(set(caps.ring_modes) | {"off"}) if caps.ring_modes else []
+    return liquidctl_modes(device)

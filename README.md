@@ -3,9 +3,28 @@
 Unified CLI for the NZXT devices on this machine.
 
 ```
-fanctl status     # live readings from every device
-fanctl caps       # what each device can and cannot do, and which backend owns it
+fanctl status                          # live readings from every device
+fanctl caps                            # what each device can and cannot do, per backend
+fanctl init                            # detect accessories after a cold boot
+
+fanctl fan set hub:2 55                # also hub:fan2, or hub:all for every channel
+fanctl pump set 40
+fanctl pump curve 30:40 40:70 50:100   # on-device, liquid temperature
+
+fanctl led set hub:2 fixed 00ff00      # -> liquidctl
+fanctl led set ring spectrum-wave      # -> openrgb, same syntax
+fanctl led set ring fading ff0000 0000ff --speed faster
+fanctl led set ring off
+
+fanctl lcd brightness 80
+fanctl lcd image ~/pic.png
+fanctl lcd liquid
 ```
+
+Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
+`hsl(0,100,50)`. Mode names are canonical across both backends —
+`fanctl caps` lists which ones a given target actually implements, since the hub
+supports six and the ring fifteen.
 
 ## Why two backends
 
@@ -31,8 +50,20 @@ installed drivers, so a liquidctl upgrade that closes a gap shows up immediately
 - **Kraken 2024 Elite RGB** — `<serial>`, `/dev/hidraw14`. Pump plus a
   light ring. Its own `fan` channel is empty; radiator fans are on the hub.
 - **Control Hub** — `<serial>`, `/dev/hidraw2`.
-  `fan2`/`led2` = F240 RGB Core, `fan4`/`led4` = F360 RGB Core. Channels 1, 3
-  and 5 are empty.
+  Channels 1, 3 and 5 are empty.
+  - `fan2`/`led2` — F240 RGB Core, **on the AIO radiator**. Confirmed visually.
+    Keep the duty floor on this channel and tie it to liquid temperature.
+  - `fan4`/`led4` — F360 RGB Core, case fans. Free to run quieter.
+
+Zone 0 on the Kraken is the pump light ring — confirmed visually, and it is the
+only populated zone on that device.
+
+## Safety floors
+
+`fan set` and `pump curve` refuse a duty below a policy floor: **30% pump, 20%
+fan**. These are not hardware limits (liquidctl permits a 20% pump); they guard
+against a mistyped `5` for `50`, which is silent until the liquid temperature
+has already climbed. `--force` overrides.
 
 ## Contention
 
@@ -80,6 +111,10 @@ stays NZXT-only and ships as a `systemctl --user` service.
 
 ## Status
 
-Phases 0 and 1 are complete: contention cleared, read-only enumeration,
-`status`, `caps`. Writes (phase 2), TOML profiles (phase 3), and the curve
-daemon (phase 4) are not yet implemented.
+Phases 0-2 complete: contention cleared, read-only enumeration, and writes for
+fans, pump, on-device pump curve, both lighting backends, and the LCD.
+
+Not yet built: TOML profiles and `apply` (phase 3), and the curve daemon with
+its systemd unit and resume hook (phase 4). Until the daemon exists, hub fans
+hold whatever fixed duty you last set — nothing is temperature-reactive except
+the pump's on-device curve.
