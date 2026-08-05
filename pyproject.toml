@@ -1,0 +1,25 @@
+[project]
+name = "fanctl"
+version = "0.1.0"
+description = "Unified CLI for NZXT devices, over liquidctl and OpenRGB"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# liquidctl is deliberately pinned: caps.py and the liquidctl backend depend on
+# internal driver attributes (_speed_channels, _color_channels) and on method
+# identity against base classes. That API carries no stability guarantee, so an
+# unpinned upgrade could break capability detection silently.
+dependencies = [
+    "liquidctl==1.16.0",
+    "openrgb-python>=0.3",
+]
+
+[project.scripts]
+fanctl = "fancontrol.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fancontrol"]
