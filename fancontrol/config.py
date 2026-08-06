@@ -67,6 +67,28 @@ class LcdSetting:
     path: str | None = None
     brightness: int | None = None
     orientation: int | None = None
+    # Which temperatures a 'stats' screen shows, in display order.
+    sources: list[str] = field(default_factory=lambda: ["cpu", "gpu"])
+
+
+@dataclass
+class DaemonSettings:
+    """Tuning for the curve daemon.
+
+    `lcd_interval` is deliberately slower than `interval`: each LCD frame is a
+    ~1.6 MB bulk transfer that allocates and switches a display bucket, and
+    upstream has an open report of rapid consecutive uploads failing to switch.
+    Frames are additionally skipped when nothing visibly changed.
+    """
+
+    interval: float = 2.0
+    lcd_interval: float = 5.0
+    min_step: int = 3
+    fallback_duty: int = 60
+    # Which profile the service runs. Without this the daemon would fall back
+    # to whichever profile happens to be defined first, which is a poor thing
+    # for a unit file to depend on.
+    profile: str | None = None
 
 
 @dataclass
@@ -83,6 +105,7 @@ class Profile:
 class Config:
     channels: dict[str, str] = field(default_factory=dict)
     profiles: dict[str, Profile] = field(default_factory=dict)
+    daemon: DaemonSettings = field(default_factory=DaemonSettings)
     path: Path | None = None
 
     def resolve_channel(self, name: str) -> str:
@@ -173,7 +196,44 @@ def _parse_lcd(raw, where: str) -> LcdSetting:
     )
     if setting.mode == "image" and not setting.path:
         raise ConfigError(f"{where}: mode 'image' needs a 'path'")
+
+    if "sources" in raw:
+        sources = raw["sources"]
+        if not isinstance(sources, list) or not sources:
+            raise ConfigError(f"{where}: 'sources' must be a non-empty list")
+        for source in sources:
+            if source not in TEMP_SOURCES:
+                raise ConfigError(
+                    f"{where}: unknown source {source!r}; "
+                    f"expected one of {', '.join(TEMP_SOURCES)}"
+                )
+        if len(sources) > 3:
+            raise ConfigError(f"{where}: at most three sources fit on the screen")
+        setting.sources = [str(s) for s in sources]
+
     return setting
+
+
+def _parse_daemon(raw, where: str) -> DaemonSettings:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: expected a table")
+    settings = DaemonSettings()
+    for key in ("interval", "lcd_interval"):
+        if key in raw:
+            value = float(raw[key])
+            if value <= 0:
+                raise ConfigError(f"{where}.{key}: must be greater than zero")
+            setattr(settings, key, value)
+    if "min_step" in raw:
+        settings.min_step = max(1, int(raw["min_step"]))
+    if "fallback_duty" in raw:
+        duty = int(raw["fallback_duty"])
+        if not 0 <= duty <= 100:
+            raise ConfigError(f"{where}.fallback_duty: must be 0-100")
+        settings.fallback_duty = duty
+    if "profile" in raw:
+        settings.profile = str(raw["profile"])
+    return settings
 
 
 def _parse_profile(name: str, raw, config: Config) -> Profile:
@@ -300,6 +360,9 @@ def load(path: Path | None = None) -> Config:
         if not isinstance(value, str):
             raise ConfigError(f"channels.{name}: expected a target string like 'hub:2'")
         config.channels[name] = value
+
+    if "daemon" in raw:
+        config.daemon = _parse_daemon(raw["daemon"], "daemon")
 
     for name, value in (raw.get("profiles") or {}).items():
         config.profiles[name] = _parse_profile(name, value, config)

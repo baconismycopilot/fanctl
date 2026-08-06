@@ -500,6 +500,53 @@ def _apply_speed(target, setting, dry_run: bool, kind: str, force: bool) -> tupl
     return 0, skipped
 
 
+def apply_static_profile(
+    found,
+    profile,
+    dry_run: bool = False,
+    force: bool = False,
+    indent: str = "  ",
+    stats_handled: bool = False,
+) -> tuple[int, list[str]]:
+    """Apply everything in a profile that is set once rather than scheduled.
+
+    Shared with the daemon, which calls this at startup and again after a
+    resume. Curves the hardware cannot run itself are reported as skipped here;
+    the daemon picks them up separately.
+    """
+    failures = 0
+    skipped: list[str] = []
+
+    # Pump first: if anything below fails, the loop is already moving.
+    if profile.pump:
+        target = target_mod.sole_device_with(
+            found, lambda c: "pump" if "pump" in c.speed_channels else None, "a pump channel"
+        )
+        f, s = _apply_speed(target, profile.pump, dry_run, "pump", force)
+        failures += f
+        skipped += s
+
+    for fan in profile.fans:
+        target = target_mod.resolve(found, fan.channel, "fan")
+        f, s = _apply_speed(target, fan, dry_run, "fan", force)
+        failures += f
+        skipped += s
+
+    for led in profile.leds:
+        target = target_mod.resolve(found, led.channel, "led")
+        colors = [color_mod.parse_color(c) for c in led.colors]
+        if dry_run:
+            print(f"{indent}would set {target}  {led.mode}{_fmt_colors(colors)}")
+            continue
+        if apply_led(target, led.mode, colors, led.speed, led.direction, indent=indent):
+            failures += 1
+
+    if profile.lcd:
+        failures += _apply_lcd(found, profile.lcd, dry_run, stats_handled)
+
+    return failures, skipped
+
+
 def cmd_apply(args) -> int:
     config = cfg_mod.load()
     profile = config.profiles.get(args.name)
@@ -516,35 +563,7 @@ def cmd_apply(args) -> int:
     label = f"{profile.name}" + (" (dry run)" if args.dry_run else "")
     print(f"{_style(label, BOLD)}  {_style(profile.description, DIM)}")
 
-    failures = 0
-    skipped: list[str] = []
-
-    # Pump first: if anything below fails, the loop is already moving.
-    if profile.pump:
-        target = target_mod.sole_device_with(
-            found, lambda c: "pump" if "pump" in c.speed_channels else None, "a pump channel"
-        )
-        f, s = _apply_speed(target, profile.pump, args.dry_run, "pump", args.force)
-        failures += f
-        skipped += s
-
-    for fan in profile.fans:
-        target = target_mod.resolve(found, fan.channel, "fan")
-        f, s = _apply_speed(target, fan, args.dry_run, "fan", args.force)
-        failures += f
-        skipped += s
-
-    for led in profile.leds:
-        target = target_mod.resolve(found, led.channel, "led")
-        colors = [color_mod.parse_color(c) for c in led.colors]
-        if args.dry_run:
-            print(f"  would set {target}  {led.mode}{_fmt_colors(colors)}")
-            continue
-        if apply_led(target, led.mode, colors, led.speed, led.direction, indent="  "):
-            failures += 1
-
-    if profile.lcd:
-        failures += _apply_lcd(found, profile.lcd, args.dry_run)
+    failures, skipped = apply_static_profile(found, profile, args.dry_run, args.force)
 
     if skipped:
         print()
@@ -554,7 +573,43 @@ def cmd_apply(args) -> int:
     return 1 if failures else 0
 
 
-def _apply_lcd(found, lcd, dry_run: bool) -> int:
+def cmd_daemon(args) -> int:
+    import logging
+
+    from . import daemon as daemon_mod
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # liquidctl logs every interpolated point of a curve at INFO -- forty lines
+    # for one pump curve, which buries the daemon's own output. Its warnings
+    # and errors are still worth seeing.
+    logging.getLogger("liquidctl").setLevel(
+        logging.DEBUG if args.verbose else logging.WARNING
+    )
+
+    config = cfg_mod.load()
+    name = args.profile or config.daemon.profile
+    if name is None:
+        print(
+            "error: no profile to run; pass --profile or set 'profile' under "
+            "[daemon] in the config",
+            file=sys.stderr,
+        )
+        return 2
+    profile = config.profiles.get(name)
+    if profile is None:
+        known = ", ".join(config.profiles)
+        print(f"error: no profile {name!r} (known: {known})", file=sys.stderr)
+        return 2
+
+    runner = daemon_mod.Daemon(config=config, profile=profile, dry_run=args.dry_run)
+    return runner.run()
+
+
+def _apply_lcd(found, lcd, dry_run: bool, stats_handled: bool = False) -> int:
     target = _lcd_target(found)
     steps: list[tuple[str, str | None]] = []
     if lcd.brightness is not None:
@@ -565,7 +620,8 @@ def _apply_lcd(found, lcd, dry_run: bool) -> int:
         steps.append(("liquid", None))
     elif lcd.mode == "image":
         steps.append(("static", str(Path(lcd.path).expanduser())))
-    elif lcd.mode == "stats":
+    elif lcd.mode == "stats" and not stats_handled:
+        # Suppressed when the daemon itself is applying: it renders the frames.
         print(_style("  skipped: lcd mode 'stats' needs the daemon", DIM))
 
     for mode, value in steps:
@@ -679,6 +735,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--force", action="store_true", help="ignore the safety duty floors")
     p.set_defaults(func=cmd_apply)
+
+    p = sub.add_parser(
+        "daemon", help="run curves the hardware cannot run itself, and stat frames"
+    )
+    p.add_argument("--profile", help="profile to run (default: the first defined)")
+    p.add_argument("--dry-run", action="store_true", help="log decisions without writing")
+    p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    p.set_defaults(func=cmd_daemon)
 
     return parser
 

@@ -12,10 +12,13 @@ caps.py so a breaking upgrade has a small blast radius.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ..lock import device_lock
+
+_LOGGER = logging.getLogger("fanctl.liquidctl")
 
 
 @dataclass
@@ -92,3 +95,89 @@ def set_color(
 def set_screen(device, mode: str, value: str | None) -> None:
     with opened(device) as handle:
         handle.set_screen("lcd", mode, value)
+
+
+class ScreenUploadError(RuntimeError):
+    """An LCD frame did not reach the panel."""
+
+
+class _LiquidctlErrorCatcher(logging.Handler):
+    """Captures the LCD failures liquidctl reports by logging rather than raising.
+
+    `_setup_bucket` and `_switch_bucket` failing are both handled upstream with
+    a bare `_LOGGER.error(...)` and no exception, so an upload that never
+    reaches the panel returns exactly like one that did. Watching the log is the
+    only signal available short of patching the driver.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.errors: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.errors.append(record.getMessage())
+
+
+def reset_screen_buckets(device) -> None:
+    """Reclaim all 16 LCD asset buckets.
+
+    Each upload claims the next free bucket, and they persist across processes
+    and reboots, so a long-running daemon eventually exhausts them and every
+    subsequent frame fails. Clearing at startup gives a known-good slate.
+    """
+    with opened(device) as handle:
+        handle._delete_all_buckets()
+
+
+def set_screen_image(device, image) -> None:
+    """Upload an in-memory PIL image to the LCD.
+
+    liquidctl's screen API only takes a path, so the frame goes through a
+    temporary file. The daemon renders several of these a minute, hence the
+    unconditional cleanup.
+
+    Bucket exhaustion is retried once after reclaiming, which is the documented
+    failure mode for repeated uploads (liquidctl issue #774).
+    """
+    import os
+    import tempfile
+
+    handle_fd, path = tempfile.mkstemp(suffix=".png", prefix="fanctl-frame-")
+    os.close(handle_fd)
+
+    logger = logging.getLogger("liquidctl")
+    catcher = _LiquidctlErrorCatcher()
+    logger.addHandler(catcher)
+    try:
+        image.save(path)
+        with opened(device) as handle:
+            # Every upload claims the next free bucket and never releases it, so
+            # a daemon pushing frames fills all sixteen and then fails on each
+            # one. Note what is occupied now: once the new frame is on screen,
+            # all of these are stale. One 16-report query is cheap next to the
+            # 1.6 MB transfer that follows.
+            stale = {i for i, resp in handle._query_buckets().items() if any(resp[15:])}
+
+            handle.set_screen("lcd", "static", path)
+
+            if catcher.errors:
+                first = "; ".join(catcher.errors)
+                catcher.errors.clear()
+                _LOGGER.debug("LCD upload failed (%s); reclaiming buckets", first)
+                handle._delete_all_buckets()
+                stale.clear()
+                handle.set_screen("lcd", "static", path)
+
+            if not catcher.errors:
+                # Safe now: the panel is displaying the newly written bucket.
+                for index in stale:
+                    handle._delete_bucket(index)
+
+        if catcher.errors:
+            raise ScreenUploadError("; ".join(catcher.errors))
+    finally:
+        logger.removeHandler(catcher)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

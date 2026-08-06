@@ -1,0 +1,28 @@
+[Unit]
+Description=fanctl curve daemon
+Documentation=https://github.com/baconismycopilot/fancontrol
+# The ring backend talks to the OpenRGB SDK server. The daemon degrades to a
+# warning without it, so this is Wants= rather than Requires=: no lighting is a
+# far better outcome than no fan control.
+Wants=openrgb-server.service
+After=openrgb-server.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/fanctl daemon
+Restart=on-failure
+RestartSec=5
+
+# Shutdown writes a safe fallback duty to every managed channel, because once
+# this stops nothing is managing cooling and the hub holds its last duty
+# indefinitely. Give that write room to complete before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Rootless by design: hidraw and the USB bulk endpoint are reachable through
+# udev uaccess ACLs. Nothing here needs privilege.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -24,6 +24,9 @@ fanctl config init                     # starter config from discovered hardware
 fanctl profile list
 fanctl apply balanced --dry-run         # show what would change, touch nothing
 fanctl apply balanced
+
+fanctl daemon --dry-run                 # log curve decisions without writing
+systemctl --user start fanctl           # run it for real
 ```
 
 Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
@@ -109,6 +112,49 @@ skipped: kraken:pump curve wants 'cpu' but the device can only follow 'liquid'
 The pump's own curve runs on the cooler and works today. Use `--dry-run` before
 trusting a new profile, and `--force` to override the duty floors.
 
+## The daemon
+
+The Control Hub can hold a fixed duty and nothing else, so anything
+temperature-reactive on those channels is scheduled from userspace. The pump's
+curve runs on the cooler itself and is written once at startup.
+
+```
+cp systemd/fanctl.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now fanctl
+journalctl --user -u fanctl -f
+```
+
+It runs the profile named by `profile` under `[daemon]`. Rootless, as a user
+service — nothing here needs privilege.
+
+```toml
+[daemon]
+profile = "adaptive"
+interval = 2.0        # temperature poll, seconds
+lcd_interval = 5.0    # floor on LCD pushes, seconds
+min_step = 3          # smallest duty change worth writing
+fallback_duty = 60    # written to managed channels on shutdown
+```
+
+Behaviours worth knowing:
+
+- **Damping is asymmetric.** A duty must move `min_step` before it is written,
+  and spinning *down* needs twice that. Temperature drops the instant load does
+  but returns just as fast, so a reluctant downward move stops fans sawing
+  during bursty work.
+- **Implausible temperatures are discarded.** A status read issued right after
+  a burst of writes returned a liquid temperature of 4°C on this hardware —
+  hidraw does not guarantee a response belongs to your request. Readings outside
+  a sane band are dropped and the channel holds its last duty for that poll.
+- **Suspend is detected, not hooked.** Sleep hooks are system-level and this
+  runs rootless, so the loop compares `CLOCK_BOOTTIME` against
+  `CLOCK_MONOTONIC`; only the former advances across suspend. Since these
+  devices keep no state through a power cycle, everything is re-applied on wake.
+- **Stopping raises the fans** to `fallback_duty`. Once the daemon is gone
+  nothing manages cooling and the hub holds its last duty forever, which is a
+  quiet trap if that duty was an idle 25%.
+
 ## The LCD
 
 `set_screen` accepts exactly five modes on this product: `liquid`, `brightness`,
@@ -133,6 +179,30 @@ Two things worth knowing before you debug this path:
   correctly rendered dark image. `_setup_bucket` and `_switch_bucket` only
   `_LOGGER.error` on failure and never raise, so a zero exit code proves
   nothing about what reached the panel.
+
+### Stat frames
+
+`lcd.mode = "stats"` renders CPU and GPU temperatures on the host and uploads
+them, since the firmware has no widget for either:
+
+```toml
+[profiles.adaptive.lcd]
+mode = "stats"
+sources = ["cpu", "gpu"]     # up to three of: cpu, gpu, liquid
+```
+
+Frames are only pushed when a displayed value actually changes. That matters:
+each upload is a ~1.6 MB bulk transfer that claims one of **16 asset buckets**,
+and those buckets persist across processes and reboots. Exhaust them and every
+subsequent frame fails — which liquidctl reports by logging, never by raising,
+so an upload that never reached the panel returns exactly like one that did.
+
+fanctl handles this in three ways: buckets are reclaimed at daemon startup, a
+failed upload is retried once after reclaiming, and liquidctl's error log is
+watched so a silent failure surfaces as a real exception
+(`ScreenUploadError`) instead of a false success. This is upstream issue #774.
+
+### Pixel format
 
 Do not "fix" this by forcing liquidctl's RGB565 path
 (`_prepare_static_file_rgb16` + `_send_2023_data_fw2`), which upstream gates on
@@ -192,13 +262,14 @@ stays NZXT-only and ships as a `systemctl --user` service.
 
 ## Status
 
-Phases 0-3 complete: contention cleared, read-only enumeration, writes across
-every writable surface, and TOML profiles with `apply`.
+All four phases complete: contention cleared, read-only enumeration, writes
+across every writable surface, TOML profiles with `apply`, and the curve daemon
+with stat frames on the LCD.
 
-Not yet built: the curve daemon with its systemd unit and resume hook (phase 4).
-Until it exists, hub fans hold whatever fixed duty you last set — nothing is
-temperature-reactive except the pump's on-device liquid curve — and nothing
-survives a power cycle, so `fanctl apply <profile>` has to be re-run.
+Known rough edges:
 
-Phase 4 also brings `lcd.mode = "stats"`: host-rendered 640×640 frames showing
-CPU and GPU temperature, since the firmware has no widget for either.
+- Curve `source` accepts `cpu`, `gpu` and `liquid`. Only `liquid` can run
+  on-device (pump only); everything else needs the daemon running.
+- The daemon re-applies on resume by detecting the suspend rather than being
+  woken by a hook. A hook would need root.
+- LCD bucket exhaustion is worked around, not fixed. The upstream bug is open.
