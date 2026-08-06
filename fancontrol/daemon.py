@@ -46,6 +46,13 @@ _LOGGER = logging.getLogger("fanctl.daemon")
 # than the loop merely running late under load.
 _SUSPEND_THRESHOLD = 10.0
 
+# How often to rewrite duties regardless of whether the governor thinks they
+# changed. The governor caches what it last applied, but a one-shot `fanctl fan
+# set` writes straight to the device behind its back -- so without this a manual
+# duty persists until the computed one happens to move, on a channel the daemon
+# is supposed to own. Reasserting periodically keeps its model honest.
+_REASSERT_TICKS = 60
+
 
 @dataclass
 class Managed:
@@ -71,6 +78,7 @@ class Daemon:
     _last_frame: tuple | None = None
     _last_lcd_push: float = 0.0
     _pushed_frame: bool = False
+    _ticks: int = 0
 
     # ------------------------------------------------------------------
 
@@ -152,6 +160,11 @@ class Daemon:
             _LOGGER.debug("not applied statically: %s", note)
 
     def tick(self, force: bool = False) -> None:
+        self._ticks += 1
+        if self._ticks % _REASSERT_TICKS == 0:
+            _LOGGER.debug("reasserting duties on managed channels")
+            force = True
+
         for entry in self.managed:
             temp = self.sources.read(entry.source)
             if temp is None:
