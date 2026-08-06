@@ -63,11 +63,14 @@ installed drivers, so a liquidctl upgrade that closes a gap shows up immediately
 
 ## Hardware layout
 
-- **Kraken 2024 Elite RGB** — `<serial>`, `/dev/hidraw14`. Pump plus a
-  light ring. Its own `fan` channel is empty; radiator fans are on the hub.
-- **Control Hub** — `<serial>`, `/dev/hidraw2`.
-  Channels 1, 3 and 5 are empty. Both fan groups are wired here, not to the
-  Kraken.
+Aliases key on serial number rather than enumeration order, so replugging an
+unrelated USB device cannot make an alias move. `fanctl status` prints the
+serials on your own machine; there is no reason to record them here.
+
+- **Kraken 2024 Elite RGB** — `/dev/hidraw14`. Pump plus a light ring. Its own
+  `fan` channel is empty; radiator fans are on the hub.
+- **Control Hub** — `/dev/hidraw2`. Channels 1, 3 and 5 are empty. Both fan
+  groups are wired here, not to the Kraken.
   - `fan2`/`led2` — F240 RGB Core, **on the AIO radiator, exhaust**. Keep the
     duty floor on this channel and tie it to liquid temperature.
   - `fan4`/`led4` — F360 RGB Core, **front intake**. Free to run quieter, and a
