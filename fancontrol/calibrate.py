@@ -49,6 +49,13 @@ INTERVAL = 10.0
 SETTLE_WINDOW = 150.0
 SETTLE_DELTA = 0.3
 
+# A load phase cannot be declared settled before this, however flat it looks.
+# Coolant lags the die badly: on this hardware the CPU reaches 86C while the
+# liquid has not moved at all, and that opening flat stretch is long enough to
+# fill the settle window. Without a floor here the phase ends during the lag
+# and reports the idle temperature as the loaded plateau.
+MIN_LOAD_SECONDS = 300.0
+
 # Refuse to keep heating past these. Tjmax on current desktop parts is around
 # 95C and the chip throttles itself well before damage, but a calibration run
 # is not the place to find out; the loop should never approach 45C at all.
@@ -90,13 +97,30 @@ class Result:
 
     @property
     def hot_slow(self) -> Plateau | None:
-        """The worst case: hottest plateau, fans held slow."""
-        return max(self.plateaus, key=lambda p: p.temp) if self.plateaus else None
+        """The worst case: fans held at their floor."""
+        return min(self.plateaus, key=lambda p: p.duty) if self.plateaus else None
 
     @property
     def hot_fast(self) -> Plateau | None:
-        """The best case: coldest plateau under load, fans at full."""
-        return min(self.plateaus, key=lambda p: p.temp) if self.plateaus else None
+        """The best case: fans at full."""
+        return max(self.plateaus, key=lambda p: p.duty) if self.plateaus else None
+
+    @property
+    def conclusive(self) -> bool:
+        """Whether the phases support any claim about airflow.
+
+        Selecting these by duty rather than temperature matters: a run whose
+        phases never settled is a monotonic climb, so the *later* phase is
+        hotter whatever its duty. Picking by temperature would label that
+        inversion 'slow' and 'fast' and present it as a measurement of what
+        airflow is worth, when it measures only the passage of time.
+        """
+        slow, fast = self.hot_slow, self.hot_fast
+        if slow is None or fast is None or slow.duty == fast.duty:
+            return False
+        if not (slow.settled and fast.settled):
+            return False
+        return slow.temp > fast.temp
 
 
 # ----------------------------------------------------------------------
@@ -156,11 +180,24 @@ def daemon_active() -> bool:
 # Measurement
 
 
-def _settled(samples: list[Sample], now: float) -> bool:
-    """True once the coolant has stopped meaningfully climbing."""
-    window = [
-        s.liquid for s in samples if s.liquid is not None and now - s.elapsed <= SETTLE_WINDOW
-    ]
+def _settled(samples: list[Sample], min_elapsed: float = 0.0) -> bool:
+    """True once the coolant has stopped meaningfully climbing.
+
+    The window is measured against the samples' own timestamps rather than a
+    caller-supplied clock. Mixing the two is easy to do and hard to see: every
+    phase after the first carries run-relative timestamps, so subtracting a
+    phase-relative elapsed goes negative and quietly turns "the trailing 150
+    seconds" into "everything so far", which then never settles.
+    """
+    timed = [(s.elapsed, s.liquid) for s in samples if s.liquid is not None]
+    if not timed:
+        return False
+
+    if timed[-1][0] - timed[0][0] < min_elapsed:
+        return False
+
+    now = timed[-1][0]
+    window = [value for stamp, value in timed if now - stamp <= SETTLE_WINDOW]
     # Enough of the window has to be filled for a flat stretch to mean anything;
     # two samples taken a moment apart are always flat.
     if len(window) < max(4, int(SETTLE_WINDOW / INTERVAL) - 1):
@@ -224,7 +261,7 @@ def _phase(
 
         report(sample)
 
-        if stop_early and _settled(samples, elapsed):
+        if stop_early and _settled(samples, MIN_LOAD_SECONDS):
             return samples
 
         # Re-pin every sample. The daemon is meant to be stopped for the
@@ -325,7 +362,7 @@ def run(
             if not values:
                 continue
             tail = values[-3:]
-            settled = _settled(samples, samples[-1].elapsed - samples[0].elapsed)
+            settled = _settled(samples)
             plateau = Plateau(duty=duty, temp=_median(tail), settled=settled)
             result.plateaus.append(plateau)
             note(
@@ -349,8 +386,11 @@ def run(
     liquids = [s.liquid for s in result.samples if s.liquid is not None]
     result.peak = max(liquids) if liquids else result.idle
 
+    # Only fit a curve to phases that actually settled. An unsettled run is a
+    # snapshot of a climb, and a curve fitted to it would be presented with the
+    # same confidence as a real measurement while being pure artefact.
     hot = result.hot_slow
-    if hot is not None:
+    if hot is not None and result.conclusive:
         result.curve = suggest_curve(
             result.idle, max(hot.temp, result.peak), min_duty, curve_max_duty
         )

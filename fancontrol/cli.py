@@ -720,7 +720,7 @@ def cmd_calibrate(args) -> int:
     print(f"  peak            {result.peak:5.1f} C")
 
     hot, cold = result.hot_slow, result.hot_fast
-    if hot is not None and cold is not None and hot.duty != cold.duty:
+    if result.conclusive:
         print(
             _style(
                 f"\n  Airflow is worth {hot.temp - cold.temp:.1f}C on this loop: everything a "
@@ -728,6 +728,24 @@ def cmd_calibrate(args) -> int:
                 DIM,
             )
         )
+    elif hot is not None:
+        # Say why, rather than printing numbers that look like conclusions.
+        unsettled = [p for p in result.plateaus if not p.settled]
+        if unsettled:
+            reason = "the loop was still heating when the phases ran out"
+        elif hot.temp <= (cold.temp if cold else hot.temp):
+            reason = "holding the fans slower did not make the loop hotter"
+        else:
+            reason = "only one fan duty was measured"
+        print(_style(f"\n  Inconclusive: {reason}.", BOLD))
+        print(
+            _style(
+                "  No curve is suggested from this run. Give the load phases longer\n"
+                "  with --phase; coolant needs several minutes just to start moving.",
+                DIM,
+            )
+        )
+        return 1
 
     if result.curve:
         points = ", ".join(f"[{t}, {d}]" for t, d in result.curve)
