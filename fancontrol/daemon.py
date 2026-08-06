@@ -65,6 +65,17 @@ class Managed:
 
 
 @dataclass
+class DisplaySpec:
+    """One value on the LCD: either a temperature or a channel's RPM."""
+
+    label: str
+    unit: str
+    source: str | None = None  # temperature source, when unit is °C
+    device: object = None  # device to read, when unit is rpm
+    channel: str | None = None
+
+
+@dataclass
 class Daemon:
     config: cfg_mod.Config
     profile: cfg_mod.Profile
@@ -79,6 +90,7 @@ class Daemon:
     _last_lcd_push: float = 0.0
     _pushed_frame: bool = False
     _ticks: int = 0
+    _display: list[DisplaySpec] = field(default_factory=list)
 
     # ------------------------------------------------------------------
 
@@ -130,12 +142,69 @@ class Daemon:
             except Exception as exc:  # noqa: BLE001 - not worth failing startup
                 _LOGGER.warning("could not reclaim LCD buckets: %s", exc)
 
+        if self.lcd_target is not None and self.profile.lcd.mode == "stats":
+            self._display = self._build_display_specs()
+
         for key, value in self.sources.describe().items():
             _LOGGER.info("temperature source %-6s -> %s", key, value)
         for entry in self.managed:
             _LOGGER.info("managing %s from %s temperature", entry.target, entry.source)
         if not self.managed:
             _LOGGER.info("no software-scheduled curves in profile %r", self.profile.name)
+
+    def _build_display_specs(self) -> list[DisplaySpec]:
+        """Resolve each configured LCD source to something readable."""
+        specs: list[DisplaySpec] = []
+
+        for source in self.profile.lcd.sources:
+            if source in temp_mod.PLAUSIBLE:
+                specs.append(DisplaySpec(label=source, unit=render_mod.CELSIUS, source=source))
+                continue
+
+            # Anything else names a speed channel: 'pump', or a fan alias whose
+            # RPM we read back from whichever device owns it. Aliases are a
+            # config-level concept, so map through them before resolving.
+            token = self.config.resolve_channel(source)
+            try:
+                target = target_mod.resolve(self.devices, token, "fan")
+            except target_mod.TargetError as exc:
+                _LOGGER.warning("LCD source %r skipped: %s", source, exc)
+                continue
+
+            specs.append(
+                DisplaySpec(
+                    label=source,
+                    unit=render_mod.RPM,
+                    device=target.device,
+                    channel=target.channel,
+                )
+            )
+            _LOGGER.info("LCD shows %s as %s rpm", source, target)
+
+        return specs
+
+    def _read_display(self) -> list[tuple[str, float | None, str]]:
+        """Sample every LCD value, reading each device's status at most once."""
+        cache: dict[str, list] = {}
+        out: list[tuple[str, float | None, str]] = []
+
+        for spec in self._display:
+            if spec.unit == render_mod.CELSIUS:
+                out.append((spec.label, self.sources.read(spec.source), spec.unit))
+                continue
+
+            readings = cache.get(spec.device.serial)
+            if readings is None:
+                try:
+                    readings = liquidctl_be.read_status(spec.device)
+                except Exception as exc:  # noqa: BLE001 - a stale frame is fine
+                    _LOGGER.debug("status read for %s failed: %s", spec.device.alias, exc)
+                    readings = []
+                cache[spec.device.serial] = readings
+
+            out.append((spec.label, liquidctl_be.pick_speed(readings, spec.channel), spec.unit))
+
+        return out
 
     # ------------------------------------------------------------------
 
@@ -188,13 +257,16 @@ class Daemon:
         if not force and (now - self._last_lcd_push) < self.config.daemon.lcd_interval:
             return
 
-        readings = [(source, self.sources.read(source)) for source in lcd.sources]
-        key = render_mod.frame_key(readings)
-        if key == self._last_frame and not force:
+        readings = self._read_display()
+        if not force and not render_mod.changed(self._last_frame, readings):
             return  # nothing visibly changed; skip a 1.6 MB transfer
 
+        key = render_mod.frame_key(readings)
         self._last_lcd_push = now
-        self._last_frame = key
+        # Store the raw sample, not the rounded one: thresholds are measured
+        # against what was last displayed, so comparing rounded values would
+        # let a slow drift accumulate without ever tripping one.
+        self._last_frame = readings
         if self.dry_run:
             _LOGGER.info("would push LCD frame %s", key)
             return

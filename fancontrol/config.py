@@ -27,6 +27,10 @@ from pathlib import Path
 
 TEMP_SOURCES = ("liquid", "cpu", "gpu")
 
+# The LCD can additionally show speeds. Curves cannot: a duty curve keyed on
+# RPM would be a feedback loop driving itself.
+SPEED_SOURCES = ("pump",)
+
 
 class ConfigError(ValueError):
     pass
@@ -185,7 +189,7 @@ def _parse_led(label: str, raw, config: Config, where: str) -> LedSetting:
     )
 
 
-def _parse_lcd(raw, where: str) -> LcdSetting:
+def _parse_lcd(raw, config: Config, where: str) -> LcdSetting:
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a table")
     setting = LcdSetting(
@@ -201,14 +205,22 @@ def _parse_lcd(raw, where: str) -> LcdSetting:
         sources = raw["sources"]
         if not isinstance(sources, list) or not sources:
             raise ConfigError(f"{where}: 'sources' must be a non-empty list")
+        if len(sources) > 4:
+            raise ConfigError(f"{where}: at most four sources fit on the screen")
         for source in sources:
-            if source not in TEMP_SOURCES:
+            source = str(source)
+            known = (
+                source in TEMP_SOURCES
+                or source in SPEED_SOURCES
+                or source in config.channels
+                or ":" in source
+            )
+            if not known:
                 raise ConfigError(
-                    f"{where}: unknown source {source!r}; "
-                    f"expected one of {', '.join(TEMP_SOURCES)}"
+                    f"{where}: unknown source {source!r}; expected a temperature "
+                    f"({', '.join(TEMP_SOURCES)}), a speed ({', '.join(SPEED_SOURCES)}), "
+                    "or a fan channel alias for its RPM"
                 )
-        if len(sources) > 3:
-            raise ConfigError(f"{where}: at most three sources fit on the screen")
         setting.sources = [str(s) for s in sources]
 
     return setting
@@ -253,7 +265,7 @@ def _parse_profile(name: str, raw, config: Config) -> Profile:
         profile.leds.append(_parse_led(label, value, config, f"{where}.led"))
 
     if "lcd" in raw:
-        profile.lcd = _parse_lcd(raw["lcd"], f"{where}.lcd")
+        profile.lcd = _parse_lcd(raw["lcd"], config, f"{where}.lcd")
 
     return profile
 

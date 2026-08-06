@@ -13,12 +13,17 @@ caps.py so a breaking upgrade has a small blast radius.
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ..lock import device_lock
 
 _LOGGER = logging.getLogger("fanctl.liquidctl")
+
+# Upload attempts before giving up on a frame. A failed frame is not fatal --
+# the daemon simply tries again next interval -- but a stale panel is visible.
+_UPLOAD_ATTEMPTS = 3
 
 
 @dataclass
@@ -51,6 +56,22 @@ def read_status(device) -> list[Reading]:
     with opened(device) as handle:
         raw = handle.get_status()
     return [Reading(key=k, value=v, unit=u) for k, v, u in raw]
+
+
+def pick_speed(readings: list[Reading], channel: str) -> float | None:
+    """Find a channel's RPM in a status snapshot.
+
+    liquidctl labels these 'Pump speed' and 'Fan 2 speed' while channels are
+    named 'pump' and 'fan2', so both sides are squashed to a comparable form
+    rather than maintaining a mapping table that would drift.
+    """
+    want = f"{channel}speed".lower().replace(" ", "")
+    for reading in readings:
+        if reading.unit != "rpm":
+            continue
+        if reading.key.lower().replace(" ", "") == want:
+            return None if reading.value is None else float(reading.value)
+    return None
 
 
 def initialize(device) -> list[Reading]:
@@ -158,15 +179,25 @@ def set_screen_image(device, image) -> None:
             # 1.6 MB transfer that follows.
             stale = {i for i, resp in handle._query_buckets().items() if any(resp[15:])}
 
-            handle.set_screen("lcd", "static", path)
-
-            if catcher.errors:
-                first = "; ".join(catcher.errors)
+            # Bucket setup and switch fail intermittently on this firmware even
+            # with buckets free (upstream #774), and recover on a second try.
+            # The pauses matter: retrying immediately tends to fail again.
+            for attempt in range(_UPLOAD_ATTEMPTS):
                 catcher.errors.clear()
-                _LOGGER.debug("LCD upload failed (%s); reclaiming buckets", first)
+                handle.set_screen("lcd", "static", path)
+                if not catcher.errors:
+                    break
+                if attempt == _UPLOAD_ATTEMPTS - 1:
+                    break
+                _LOGGER.debug(
+                    "LCD upload attempt %d failed (%s); reclaiming and retrying",
+                    attempt + 1,
+                    "; ".join(catcher.errors),
+                )
+                time.sleep(0.4)
                 handle._delete_all_buckets()
                 stale.clear()
-                handle.set_screen("lcd", "static", path)
+                time.sleep(0.3)
 
             if not catcher.errors:
                 # Safe now: the panel is displaying the newly written bucket.

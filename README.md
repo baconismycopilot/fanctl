@@ -182,25 +182,45 @@ Two things worth knowing before you debug this path:
 
 ### Stat frames
 
-`lcd.mode = "stats"` renders CPU and GPU temperatures on the host and uploads
-them, since the firmware has no widget for either:
+`lcd.mode = "stats"` renders temperatures and speeds on the host and uploads
+them, since the firmware has no widget for any of them:
 
 ```toml
 [profiles.adaptive.lcd]
 mode = "stats"
-sources = ["cpu", "gpu"]     # up to three of: cpu, gpu, liquid
+sources = ["cpu", "gpu", "pump", "radiator"]
 ```
 
-Frames are only pushed when a displayed value actually changes. That matters:
+Up to four sources. Temperatures (`cpu`, `gpu`, `liquid`) render in °C with
+colour bands — blue, amber past 65, red past 80. Speeds render in RPM without
+bands, since a high RPM is not a problem the way a high temperature is:
+`pump`, or **any fan channel alias** for that fan's speed.
+
+One to three sources stack as rows; four switch to a 2×2 grid, because the
+bottom row of a four-row stack lands where the round panel has narrowed to
+under half its width. Value text auto-shrinks to fit its cell — a four-digit
+RPM is more than twice the width of a two-digit temperature.
+
+Frames are only pushed when a value moves beyond a threshold (1°C, 30 RPM)
+rather than on any change at all. Fan and pump RPM jitter by a couple of counts
+between polls, and treating that as a change would push a frame on almost every
+interval forever. That matters:
 each upload is a ~1.6 MB bulk transfer that claims one of **16 asset buckets**,
 and those buckets persist across processes and reboots. Exhaust them and every
 subsequent frame fails — which liquidctl reports by logging, never by raising,
 so an upload that never reached the panel returns exactly like one that did.
 
-fanctl handles this in three ways: buckets are reclaimed at daemon startup, a
-failed upload is retried once after reclaiming, and liquidctl's error log is
-watched so a silent failure surfaces as a real exception
-(`ScreenUploadError`) instead of a false success. This is upstream issue #774.
+fanctl handles this four ways: stale buckets are pruned after each successful
+push (occupancy holds at 1/16), startup reclaims whatever earlier runs left
+behind, uploads retry up to three times with a pause and a reclaim between
+attempts, and liquidctl's error log is watched so a silent failure surfaces as a
+real exception (`ScreenUploadError`) instead of a false success.
+
+Setup and switch still fail intermittently even with buckets free, and recover
+on the next attempt — retrying immediately tends to fail again, hence the
+pauses. This is upstream issue #774. A frame that fails all three attempts is
+logged and retried on the next interval; the panel just holds the previous
+frame.
 
 ### Pixel format
 
