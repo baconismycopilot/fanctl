@@ -12,6 +12,7 @@ help:
 	@echo "  lint         format, then check"
 	@echo "  format       apply ruff formatting and fixes"
 	@echo "  check        clean, lint and test"
+	@echo "  hooks        install the pre-commit ruff gate"
 	@echo ""
 	@echo "  service      install the user unit and enable it"
 	@echo "  start stop restart   control the running daemon"
@@ -45,6 +46,13 @@ test:
 
 .PHONY: check
 check: clean lint test
+
+# Only ruff runs here. `make check` stays the full gate -- tests take a couple
+# of seconds and a hook that slow is one people start passing --no-verify to.
+.PHONY: hooks
+hooks:
+	uv run --group dev pre-commit install
+	@echo "ruff now runs on staged Python files before each commit"
 
 # --- the user service -------------------------------------------------
 # Rootless throughout: udev grants uaccess on both hidraw nodes, so nothing

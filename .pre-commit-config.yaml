@@ -1,0 +1,30 @@
+# Lint gate for commits. Install it with `make hooks`.
+#
+# These are `local` hooks run through uv rather than pre-commit's own pinned
+# mirrors, which would build a second, separately-versioned ruff in an isolated
+# environment of their own. One ruff -- the one in uv.lock, reading the rules
+# pinned in pyproject.toml -- is the whole point: the same reasoning that puts
+# those rules in the project instead of trusting whatever ruff happens to be
+# installed globally.
+repos:
+  - repo: local
+    hooks:
+      # --fix, then a failed hook, is deliberate. The fixes are applied to the
+      # working tree but not to what you staged, so the commit stops and you
+      # look at what changed before `git add`-ing it. A hook that silently
+      # rewrote staged content would put things in a commit you never read.
+      - id: ruff-check
+        name: ruff check --fix
+        entry: uv run --group dev ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # After the fixer, never before: an autofix can leave a line that needs
+      # reflowing, and formatting first would miss it.
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --group dev ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
