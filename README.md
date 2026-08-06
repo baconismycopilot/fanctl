@@ -157,14 +157,18 @@ skipped: hub:fan2 curve needs the daemon (no device-side curve support)
 skipped: kraken:pump curve wants 'cpu' but the device can only follow 'liquid'
 ```
 
-The pump's own curve runs on the cooler and works today. Use `--dry-run` before
-trusting a new profile, and `--force` to override the duty floors.
+The pump's curve runs on the cooler when it follows `liquid`. Keyed on `cpu` it
+is scheduled by the daemon instead — see below for why that is usually what you
+want. Use `--dry-run` before trusting a new profile, and `--force` to override
+the duty floors.
 
 ## The daemon
 
 The Control Hub can hold a fixed duty and nothing else, so anything
 temperature-reactive on those channels is scheduled from userspace. The pump's
-curve runs on the cooler itself and is written once at startup.
+curve runs on the cooler itself and is written once at startup — *if* it follows
+liquid temperature, which is the only thing the Kraken can interpolate against.
+A pump curve keyed on `cpu` is scheduled here like any hub channel.
 
 ```
 cp systemd/fanctl.service ~/.config/systemd/user/
@@ -250,6 +254,31 @@ interrupted run never leaves the fans pinned with nothing managing them. Pass
 Nothing is written to the config: the suggested curve is printed for you to
 paste, because the temperature it was fitted at is worth reading before you
 adopt it.
+
+### It measures coolant temperature, which is the wrong variable for the pump
+
+`fanctl calibrate pump --hold radiator=40 --hold intake=40` on this machine came
+back **inconclusive**, and correctly so:
+
+| pump | CPU | liquid | CPU − liquid |
+| --- | --- | --- | --- |
+| 30% | 88.17 (sd 0.05) | 32.21 | **55.96** (sd 0.23) |
+| 100% | 86.03 (sd 0.08) | 32.70 | **53.33** (sd 0.08) |
+
+Doubling pump speed moved coolant temperature by nothing — against 4.8 °C for
+the radiator fans, the pump is not a lever on it at all. But it cut the
+CPU-to-coolant delta by **2.6 °C**, which is precisely a pump's job: moving heat
+out of the die and into the loop, not rejecting it at the radiator.
+
+So `calibrate` reports honestly on a quantity that does not answer the question
+for this channel. Read the CSV's `cpu` column against `liquid`, not the fitted
+curve. And key the pump on `cpu` — which the Kraken cannot do on-device, hence
+the daemon.
+
+Two consequences if you copy this setup: `--hold` matters, because calibrating
+the pump with the fans free measures both at once; and a coolant-keyed pump
+curve is close to useless here, since the loop only ever spans 28.8–32.7 °C and
+any curve written across a wider range never leaves its first segment.
 
 ## The LCD
 
@@ -408,6 +437,8 @@ Known rough edges:
 
 - Curve `source` accepts `cpu`, `gpu` and `liquid`. Only `liquid` can run
   on-device (pump only); everything else needs the daemon running.
+- A CPU-keyed pump curve chases a spiky sensor. `min_step` damps it, and a
+  70-second load showed no hunting, but it is worth listening for.
 - The daemon re-applies on resume by detecting the suspend rather than being
   woken by a hook. A hook would need root.
 - LCD bucket exhaustion is worked around, not fixed. The upstream bug is open.

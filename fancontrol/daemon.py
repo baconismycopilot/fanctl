@@ -2,8 +2,14 @@
 
 Exists because the Control Hub has no device-side curve support: it can hold a
 fixed duty and nothing more. Anything temperature-reactive on those channels has
-to be scheduled from userspace. The Kraken's pump curve, by contrast, runs on
-the cooler itself and is written once at startup rather than every tick.
+to be scheduled from userspace.
+
+The Kraken's pump curve can run on the cooler itself, and is written once at
+startup when it does. But the Kraken interpolates against its own liquid probe
+and nothing else, so a pump curve keyed on CPU temperature is scheduled here
+like any hub channel. That is worth doing: measurement on this loop put pump
+speed at 2.6C of CPU temperature and roughly nothing on coolant temperature, so
+the thing a pump curve should react to is the one the cooler cannot read.
 
 Three behaviours are worth knowing about:
 
@@ -111,27 +117,18 @@ class Daemon:
             device_reader=(lambda: _read_liquid(liquid_device)) if liquid_device else None
         )
 
-        for fan in self.profile.fans:
-            if fan.curve is None:
-                continue
-            target = target_mod.resolve(self.devices, fan.channel, "fan")
-            if target.caps.speed_profile and fan.source == (
-                target.caps.profile_temp_source or "liquid"
-            ):
-                # The device can run this itself; applied once, not scheduled.
-                continue
-            self.managed.append(
-                Managed(
-                    target=target,
-                    governor=curve_mod.Governor(
-                        curve=fan.curve,
-                        floor=caps_mod.duty_floor("fan"),
-                        min_step=self.config.daemon.min_step,
-                    ),
-                    source=fan.source,
-                    label=fan.label,
-                )
+        if self.profile.pump:
+            self._manage(
+                self.profile.pump,
+                target_mod.sole_device_with(
+                    self.devices,
+                    lambda c: "pump" if "pump" in c.speed_channels else None,
+                    "a pump channel",
+                ),
             )
+
+        for fan in self.profile.fans:
+            self._manage(fan, target_mod.resolve(self.devices, fan.channel, "fan"))
 
         if self.lcd_target is not None and self.profile.lcd.mode == "stats" and not self.dry_run:
             # Buckets persist across processes and reboots; a stale set left by
@@ -228,6 +225,33 @@ class Daemon:
         for note in skipped:
             _LOGGER.debug("not applied statically: %s", note)
 
+    def _manage(self, setting, target) -> None:
+        """Schedule a curve here, unless the device can run it itself.
+
+        The pump goes through this on the same terms as a fan. Its curve runs
+        on the cooler when it follows liquid temperature, but the Kraken can
+        only interpolate against its own probe -- so a pump curve keyed on CPU
+        has to be scheduled from here or it does not run at all.
+        """
+        if setting.curve is None:
+            return
+        if target.caps.speed_profile and setting.source == (
+            target.caps.profile_temp_source or "liquid"
+        ):
+            return
+        self.managed.append(
+            Managed(
+                target=target,
+                governor=curve_mod.Governor(
+                    curve=setting.curve,
+                    floor=caps_mod.duty_floor(target.channel),
+                    min_step=self.config.daemon.min_step,
+                ),
+                source=setting.source,
+                label=setting.label,
+            )
+        )
+
     def tick(self, force: bool = False) -> None:
         self._ticks += 1
         if self._ticks % _REASSERT_TICKS == 0:
@@ -290,8 +314,11 @@ class Daemon:
 
     def shutdown(self) -> None:
         """Leave the fans somewhere safe: nothing is managing them now."""
-        duty = self.config.daemon.fallback_duty
         for entry in self.managed:
+            # One fallback_duty covers channels with different floors now that
+            # the pump can be managed here, so it is raised per channel rather
+            # than written raw -- a fallback of 25 must not stop the pump.
+            duty = max(self.config.daemon.fallback_duty, caps_mod.duty_floor(entry.target.channel))
             if self.dry_run:
                 _LOGGER.info("would set %s to fallback %d%%", entry.target, duty)
                 continue
