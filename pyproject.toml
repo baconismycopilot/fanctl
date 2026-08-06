@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "Unified CLI for NZXT devices, over liquidctl and OpenRGB"
 readme = "README.md"
 requires-python = ">=3.11"
+# GPL because both runtime dependencies are: liquidctl is GPL-3.0-or-later and
+# openrgb-python is GPLv3, and both are imported as libraries rather than run
+# as subprocesses. A permissive licence here would not be ours to give.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 
 # liquidctl is deliberately pinned: caps.py and the liquidctl backend depend on
 # internal driver attributes (_speed_channels, _color_channels) and on method

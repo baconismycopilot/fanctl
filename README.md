@@ -1,5 +1,8 @@
 # fanctl
 
+[![CI](https://github.com/baconismycopilot/fanctl/actions/workflows/ci.yml/badge.svg)](https://github.com/baconismycopilot/fanctl/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 Unified CLI for the NZXT devices on this machine.
 
 ```
@@ -458,3 +461,9 @@ Known rough edges:
 - The daemon re-applies on resume by detecting the suspend rather than being
   woken by a hook. A hook would need root.
 - LCD bucket exhaustion is worked around, not fixed. The upstream bug is open.
+
+## Licence
+
+GPL-3.0-or-later. Not a preference: both backends are imported as libraries
+rather than run as subprocesses, and liquidctl is GPL-3.0-or-later while
+openrgb-python is GPLv3. A permissive licence here would not be ours to give.
