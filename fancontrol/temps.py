@@ -11,6 +11,7 @@ disappearing and coming back.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -100,7 +101,7 @@ def _find_gpu() -> Path | None:
 class Sources:
     """Lazily-resolved temperature readers, shared across a daemon run."""
 
-    device_reader: object = None  # callable returning liquid temp, or None
+    device_reader: Callable[[], float | None] | None = None
     _paths: dict[str, Path | None] = field(default_factory=dict)
 
     def _sysfs(self, key: str, finder) -> float | None:

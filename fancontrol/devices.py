@@ -78,6 +78,8 @@ def discover() -> list[Device]:
 
     for handle in find_liquidctl_devices():
         product = getattr(handle.device, "product_id", None)
+        if product is None:
+            continue
         spec = REGISTRY.get(product)
         if spec is None or getattr(handle.device, "vendor_id", None) != spec.vendor:
             continue

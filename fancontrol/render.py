@@ -207,7 +207,9 @@ def changed(previous, current) -> bool:
             return True
         if (old_value is None) != (new_value is None):
             return True
-        if new_value is None:
+        # Either both are None or neither is, given the check above; naming
+        # both keeps that readable rather than implied.
+        if new_value is None or old_value is None:
             continue
         if abs(new_value - old_value) >= CHANGE_THRESHOLD.get(new_unit, 1.0):
             return True

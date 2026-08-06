@@ -215,7 +215,7 @@ def _read(sources, device, channel) -> tuple[float | None, float | None, int | N
         want = f"{channel}duty".lower().replace(" ", "")
         for reading in readings:
             if reading.unit == "%" and reading.key.lower().replace(" ", "") == want:
-                duty = int(reading.value)
+                duty = None if reading.value is None else int(reading.value)
     except Exception:
         pass
     return cpu, liquid, duty, rpm

@@ -281,7 +281,10 @@ def _led_via_liquidctl(
     target, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
 ) -> int:
     available = caps_mod.liquidctl_modes(target.device)
-    if mode not in available:
+    native = color_mod.canonical_for_liquidctl(mode)
+    # `available` is derived from the same table `native` is looked up in, so
+    # the second half only fires if those two ever drift apart.
+    if mode not in available or native is None:
         print(
             f"error: {target.device.alias} does not implement mode {mode!r}; "
             f"available: {', '.join(available)}",
@@ -289,7 +292,6 @@ def _led_via_liquidctl(
         )
         return 2
 
-    native = color_mod.canonical_for_liquidctl(mode)
     liquidctl_be.set_color(
         target.device,
         target.channel,
@@ -757,7 +759,7 @@ def cmd_calibrate(args) -> int:
     # Anything else that reacts to liquid temperature has to be nailed down, or
     # it responds to the very changes being measured. Calibrating the pump with
     # the radiator fans free would measure the pair of them.
-    held: list[tuple[object, str, int]] = []
+    held: list[tuple[target_mod.Target, str, int]] = []
     for spec in args.hold or []:
         name, _, raw = spec.partition("=")
         if not raw.isdigit():
@@ -858,7 +860,7 @@ def cmd_calibrate(args) -> int:
     print(f"  peak            {result.peak:5.1f} C")
 
     hot, cold = result.hot_slow, result.hot_fast
-    if result.conclusive:
+    if hot is not None and cold is not None and result.conclusive:
         print(
             _style(
                 f"\n  Airflow is worth {hot.temp - cold.temp:.1f}C on this loop: everything a "
