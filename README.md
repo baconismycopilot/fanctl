@@ -222,6 +222,13 @@ pauses. This is upstream issue #774. A frame that fails all three attempts is
 logged and retried on the next interval; the panel just holds the previous
 frame.
 
+Recovered attempts do not reach the log at `INFO`. liquidctl reports these by
+logging `ERROR` directly, and at the rate this firmware produces them that
+trains you to scroll past the one line that matters, so propagation is
+suppressed for the duration of an upload — a recovered attempt appears only
+under `-v`, while a frame that exhausts all three attempts still surfaces as a
+warning carrying liquidctl's own messages.
+
 ### Pixel format
 
 Do not "fix" this by forcing liquidctl's RGB565 path

@@ -169,6 +169,19 @@ def set_screen_image(device, image) -> None:
     logger = logging.getLogger("liquidctl")
     catcher = _LiquidctlErrorCatcher()
     logger.addHandler(catcher)
+
+    # Take liquidctl's errors off the console for the duration of the upload.
+    # Bucket setup and switch fail often enough here (#774) that logging every
+    # recovered attempt trains you to scroll past the line that matters. The
+    # catcher still sees them, so nothing is lost: a recovered attempt is
+    # reported at DEBUG below, and a frame that exhausts every attempt carries
+    # the same messages out on ScreenUploadError for the caller to log.
+    #
+    # This is safe only because the whole block holds the device lock and the
+    # daemon is single-threaded; nothing else in this process is talking to
+    # liquidctl while propagation is off.
+    propagate = logger.propagate
+    logger.propagate = False
     try:
         image.save(path)
         with opened(device) as handle:
@@ -207,6 +220,7 @@ def set_screen_image(device, image) -> None:
         if catcher.errors:
             raise ScreenUploadError("; ".join(catcher.errors))
     finally:
+        logger.propagate = propagate
         logger.removeHandler(catcher)
         try:
             os.unlink(path)
