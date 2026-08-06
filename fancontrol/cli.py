@@ -635,6 +635,26 @@ def cmd_calibrate(args) -> int:
         print("error: no CPU temperature source found", file=sys.stderr)
         return 1
 
+    # The pump has its own, higher floor. Pinning it at the fan floor would run
+    # it slower than any command here is allowed to set it.
+    floor = caps_mod.duty_floor("pump" if target.channel == "pump" else "fan")
+
+    # Anything else that reacts to liquid temperature has to be nailed down, or
+    # it responds to the very changes being measured. Calibrating the pump with
+    # the radiator fans free would measure the pair of them.
+    held: list[tuple[object, str, int]] = []
+    for spec in args.hold or []:
+        name, _, raw = spec.partition("=")
+        if not raw.isdigit():
+            print(f"error: --hold wants CHANNEL=DUTY, got {spec!r}", file=sys.stderr)
+            return 2
+        try:
+            other = target_mod.resolve(found, config.resolve_channel(name.strip()), "fan")
+        except target_mod.TargetError as exc:
+            print(f"error: --hold {spec}: {exc}", file=sys.stderr)
+            return 2
+        held.append((other, name.strip(), int(raw)))
+
     minutes = (args.idle + args.phase * 2 + args.cooldown) / 60
     print(f"{_style('calibrating ' + str(target), BOLD)}")
     print(
@@ -654,6 +674,11 @@ def cmd_calibrate(args) -> int:
     if stop_daemon:
         print(_style(f"  stopping {cal_mod.UNIT} for the duration", DIM))
         cal_mod._systemctl("stop", cal_mod.UNIT)
+
+    # After the daemon is down, so nothing writes over these.
+    for other, name, duty in held:
+        liquidctl_be.set_fixed_speed(other.device, other.channel, duty)
+        print(_style(f"  holding {name} ({other}) at {duty}%", DIM))
 
     def report(sample) -> None:
         bits = [f"  {sample.elapsed / 60:5.1f}m  {sample.phase:<10}"]
@@ -675,6 +700,7 @@ def cmd_calibrate(args) -> int:
             idle_seconds=args.idle,
             phase_seconds=args.phase,
             cooldown_seconds=args.cooldown,
+            min_duty=floor,
             max_duty=args.max_duty,
             curve_max_duty=args.curve_max_duty,
             report=report,
@@ -689,10 +715,13 @@ def cmd_calibrate(args) -> int:
     finally:
         # Whatever happened, do not leave the fans pinned where a measurement
         # left them and nothing running to move them.
-        try:
-            liquidctl_be.set_fixed_speed(target.device, target.channel, config.daemon.fallback_duty)
-        except Exception as exc:
-            print(f"  could not restore duty on {target}: {exc}", file=sys.stderr)
+        restore = config.daemon.fallback_duty
+        for channel_target in [target, *(h[0] for h in held)]:
+            duty = max(restore, caps_mod.duty_floor(channel_target.channel))
+            try:
+                liquidctl_be.set_fixed_speed(channel_target.device, channel_target.channel, duty)
+            except Exception as exc:
+                print(f"  could not restore duty on {channel_target}: {exc}", file=sys.stderr)
         if stop_daemon:
             print(_style(f"  restarting {cal_mod.UNIT}", DIM))
             cal_mod._systemctl("start", cal_mod.UNIT)
@@ -892,7 +921,7 @@ def build_parser() -> argparse.ArgumentParser:
             "and the machine will be loud throughout."
         ),
     )
-    p.add_argument("channel", help="fan channel or alias to characterise, e.g. 'radiator'")
+    p.add_argument("channel", help="channel or alias to characterise, e.g. 'radiator' or 'pump'")
     p.add_argument("--idle", type=float, default=120.0, help="idle baseline seconds (120)")
     p.add_argument("--phase", type=float, default=900.0, help="cap per load phase in seconds (900)")
     p.add_argument("--cooldown", type=float, default=300.0, help="cooldown seconds (300)")
@@ -906,6 +935,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="top duty of the suggested curve (100)",
     )
     p.add_argument("--csv", help="write every sample to this file")
+    p.add_argument(
+        "--hold",
+        action="append",
+        metavar="CHANNEL=DUTY",
+        help=(
+            "pin another channel for the duration, e.g. --hold radiator=40. "
+            "Anything else reacting to liquid temperature will otherwise "
+            "respond to what is being measured. Repeatable."
+        ),
+    )
     p.add_argument(
         "--no-manage-daemon",
         dest="manage_daemon",
