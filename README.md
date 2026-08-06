@@ -27,6 +27,8 @@ fanctl apply balanced
 
 fanctl daemon --dry-run                 # log curve decisions without writing
 systemctl --user start fanctl           # run it for real
+
+fanctl calibrate radiator               # measure the loop, fit a curve to it
 ```
 
 Colours accept `ff0000`, `#ff0000`, `rgb(255,0,0)`, `hsv(0,100,100)` or
@@ -154,6 +156,54 @@ Behaviours worth knowing:
 - **Stopping raises the fans** to `fallback_duty`. Once the daemon is gone
   nothing manages cooling and the hub holds its last duty forever, which is a
   quiet trap if that duty was an idle 25%.
+
+## Calibration
+
+A curve is only doing work over the range the loop actually occupies. Points
+below idle never engage; points above the hottest it ever gets are decoration.
+That range cannot be guessed — it depends on radiator area, ambient, pump speed
+and how much heat the CPU really dumps — so `calibrate` measures it:
+
+```
+fanctl calibrate radiator --csv ~/soak.csv
+```
+
+It records an idle baseline, then loads every core and holds the fans at a
+fixed duty while the coolant settles, twice: once at the floor and once at full
+speed. It prints what it measured and a curve fitted to it.
+
+**Why it pins the fans.** Loading the machine and watching the coolant settle
+measures one point of a feedback loop — the temperature is only that because
+the fans were running at whatever duty the *current* curve chose. Fit a new
+curve to that number and you have used the old curve's behaviour to justify the
+new one. Holding the fans still removes the feedback, and running both ends
+gives the two temperatures that matter:
+
+| Phase | Meaning |
+| --- | --- |
+| Load, fans at floor | the hottest the loop gets when the curve is not helping — where a curve should be asking for everything |
+| Load, fans at full | the coldest it can be held under that load — below this, more airflow buys nothing |
+
+Everything a curve can change happens between those two. On this machine the
+gap is only a few degrees, which is why the fitted curve is much steeper than
+it looks like it should be. That is correct: coolant temperature is heavily
+damped, so a steep curve on liquid does not produce the hunting that the same
+slope on a CPU sensor would.
+
+The run takes about half an hour by default (`--idle`, `--phase`, `--cooldown`
+shorten it) and the machine is loud throughout. Sampling continues after the
+load stops, because if the loop had not yet plateaued its peak arrives minutes
+*late* and a curve fitted without it will be caught out.
+
+The `fanctl` service is stopped for the duration and restarted afterwards —
+otherwise it would overwrite every pinned duty. That restart happens on Ctrl-C
+and on failure too, along with restoring `fallback_duty` to the channel, so an
+interrupted run never leaves the fans pinned with nothing managing them. Pass
+`--no-manage-daemon` to handle the service yourself.
+
+Nothing is written to the config: the suggested curve is printed for you to
+paste, because the temperature it was fitted at is worth reading before you
+adopt it.
 
 ## The LCD
 

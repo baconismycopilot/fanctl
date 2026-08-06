@@ -12,6 +12,7 @@ from . import colors as color_mod
 from . import config as cfg_mod
 from . import devices as dev_mod
 from . import targets as target_mod
+from . import temps as temp_mod
 from .backends import liquidctl_be, openrgb_be
 
 DIM = "\033[2m"
@@ -609,6 +610,132 @@ def cmd_daemon(args) -> int:
     return runner.run()
 
 
+def cmd_calibrate(args) -> int:
+    from . import calibrate as cal_mod
+    from .daemon import _read_liquid
+
+    config = cfg_mod.load()
+    found = dev_mod.discover()
+    if not found:
+        print("no supported NZXT devices found", file=sys.stderr)
+        return 1
+
+    try:
+        target = target_mod.resolve(found, config.resolve_channel(args.channel), "fan")
+    except target_mod.TargetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    liquid_device = None
+    for device in found:
+        if "pump" in caps_mod.inspect_device(device).speed_channels:
+            liquid_device = device
+    if liquid_device is None:
+        print("error: no device reports a liquid temperature", file=sys.stderr)
+        return 1
+
+    sources = temp_mod.Sources(device_reader=lambda: _read_liquid(liquid_device))
+    if sources.read("cpu") is None:
+        print("error: no CPU temperature source found", file=sys.stderr)
+        return 1
+
+    minutes = (args.idle + args.phase * 2 + args.cooldown) / 60
+    print(f"{_style('calibrating ' + str(target), BOLD)}")
+    print(
+        _style(
+            f"  up to {minutes:.0f} min. Every core runs flat out for most of it, and the\n"
+            f"  fans are held at fixed duties, so the machine will be loud and hot.\n"
+            f"  Ctrl-C stops it and puts everything back.",
+            DIM,
+        )
+    )
+    print()
+
+    # The daemon owns this channel and would overwrite every duty we pin, so it
+    # has to stand down for the duration -- and be put back afterwards whatever
+    # happens, including Ctrl-C.
+    stop_daemon = args.manage_daemon and cal_mod.daemon_active()
+    if stop_daemon:
+        print(_style(f"  stopping {cal_mod.UNIT} for the duration", DIM))
+        cal_mod._systemctl("stop", cal_mod.UNIT)
+
+    def report(sample) -> None:
+        bits = [f"  {sample.elapsed / 60:5.1f}m  {sample.phase:<10}"]
+        bits.append(f"cpu {sample.cpu:5.1f}C" if sample.cpu is not None else "cpu    --")
+        bits.append(f"liquid {sample.liquid:5.1f}C" if sample.liquid is not None else "liquid   --")
+        if sample.duty is not None:
+            bits.append(f"{sample.duty:3d}%")
+        if sample.rpm is not None:
+            bits.append(f"{sample.rpm:5.0f} rpm")
+        print("  ".join(bits), flush=True)
+
+    def note(message) -> None:
+        print(_style(f"\n  {message}", BOLD), flush=True)
+
+    try:
+        result = cal_mod.run(
+            target,
+            sources,
+            idle_seconds=args.idle,
+            phase_seconds=args.phase,
+            cooldown_seconds=args.cooldown,
+            max_duty=args.max_duty,
+            curve_max_duty=args.curve_max_duty,
+            report=report,
+            note=note,
+        )
+    except KeyboardInterrupt:
+        print("\n  interrupted", file=sys.stderr)
+        return 130
+    except cal_mod.CalibrationError as exc:
+        print(f"\nerror: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        # Whatever happened, do not leave the fans pinned where a measurement
+        # left them and nothing running to move them.
+        try:
+            liquidctl_be.set_fixed_speed(
+                target.device, target.channel, config.daemon.fallback_duty
+            )
+        except Exception as exc:  # noqa: BLE001 - report, do not mask the real error
+            print(f"  could not restore duty on {target}: {exc}", file=sys.stderr)
+        if stop_daemon:
+            print(_style(f"  restarting {cal_mod.UNIT}", DIM))
+            cal_mod._systemctl("start", cal_mod.UNIT)
+
+    if args.csv:
+        cal_mod.write_csv(result, args.csv)
+        print(_style(f"\n  {len(result.samples)} samples written to {args.csv}", DIM))
+
+    print()
+    if result.aborted:
+        print(_style(f"  ABORTED: {result.aborted}", BOLD))
+        print(_style("  the numbers below cover only what was measured first", DIM))
+
+    print(f"{_style('measured', BOLD)}  {target}")
+    print(f"  idle            {result.idle:5.1f} C")
+    for plateau in result.plateaus:
+        suffix = "" if plateau.settled else "  (still climbing)"
+        print(f"  load at {plateau.duty:3d}%     {plateau.temp:5.1f} C{suffix}")
+    print(f"  peak            {result.peak:5.1f} C")
+
+    hot, cold = result.hot_slow, result.hot_fast
+    if hot is not None and cold is not None and hot.duty != cold.duty:
+        print(
+            _style(
+                f"\n  Airflow is worth {hot.temp - cold.temp:.1f}C on this loop: everything a "
+                f"curve\n  can change happens between {cold.temp:.1f}C and {hot.temp:.1f}C.",
+                DIM,
+            )
+        )
+
+    if result.curve:
+        points = ", ".join(f"[{t}, {d}]" for t, d in result.curve)
+        print(f"\n{_style('suggested', BOLD)}  for {args.channel} in ~/.config/fanctl/config.toml")
+        print(f"  {args.channel} = {{ curve = [{points}], source = \"liquid\" }}")
+    return 0
+
+
 def _apply_lcd(found, lcd, dry_run: bool, stats_handled: bool = False) -> int:
     target = _lcd_target(found)
     steps: list[tuple[str, str | None]] = []
@@ -743,6 +870,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="log decisions without writing")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     p.set_defaults(func=cmd_daemon)
+
+    p = sub.add_parser(
+        "calibrate",
+        help="measure the loop's real temperature range and fit a curve to it",
+        description=(
+            "Load every core, hold the fans at fixed duties, and record where the "
+            "coolant settles at each. The gap between those two plateaus is the "
+            "entire range in which a fan curve can change anything -- points "
+            "outside it never do useful work. Takes about half an hour by default "
+            "and the machine will be loud throughout."
+        ),
+    )
+    p.add_argument("channel", help="fan channel or alias to characterise, e.g. 'radiator'")
+    p.add_argument("--idle", type=float, default=120.0, help="idle baseline seconds (120)")
+    p.add_argument(
+        "--phase", type=float, default=900.0, help="cap per load phase in seconds (900)"
+    )
+    p.add_argument("--cooldown", type=float, default=300.0, help="cooldown seconds (300)")
+    p.add_argument(
+        "--max-duty", type=int, default=100, help="duty for the full-airflow phase (100)"
+    )
+    p.add_argument(
+        "--curve-max-duty",
+        type=int,
+        default=100,
+        help="top duty of the suggested curve (100)",
+    )
+    p.add_argument("--csv", help="write every sample to this file")
+    p.add_argument(
+        "--no-manage-daemon",
+        dest="manage_daemon",
+        action="store_false",
+        help="do not stop and restart the fanctl service around the run",
+    )
+    p.set_defaults(func=cmd_calibrate)
 
     return parser
 
