@@ -36,7 +36,7 @@ def connect(port: int = DEFAULT_PORT, name: str = "fanctl"):
         from openrgb import OpenRGBClient
 
         return OpenRGBClient(port=port, name=name)
-    except Exception as exc:  # noqa: BLE001 - any failure means "degrade"
+    except Exception as exc:
         raise OpenRGBUnavailable(
             f"OpenRGB SDK server not reachable on port {port}: {exc}\n"
             "  start it with: systemctl --user start openrgb-server"
@@ -76,7 +76,7 @@ def _apply_colors(mode, colors: list[list[int]]) -> None:
 
 def set_ring(
     client,
-    ring: "Ring",
+    ring: Ring,
     mode_name: str | None,
     colors: list[list[int]],
     speed: int | None = None,

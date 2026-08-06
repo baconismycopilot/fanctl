@@ -78,8 +78,8 @@ def quantise(value: float | None, unit: str) -> int | None:
     if value is None:
         return None
     if unit == RPM:
-        return int(round(value / 10.0) * 10)
-    return int(round(value))
+        return round(value / 10.0) * 10
+    return round(value)
 
 
 def _fmt(value: float | None, unit: str) -> str:
@@ -170,7 +170,7 @@ def render_stats(readings: list[tuple[str, float | None, str]]):
     value_size = 150 if len(readings) <= 2 else 104
     label_size = 38 if len(readings) <= 2 else 28
 
-    for index, (reading, y) in enumerate(zip(readings, rows)):
+    for index, (reading, y) in enumerate(zip(readings, rows, strict=True)):
         if index:
             mid = (rows[index - 1] + y) // 2
             half = 150 if len(readings) <= 2 else 120
@@ -200,7 +200,7 @@ def changed(previous, current) -> bool:
     if previous is None or len(previous) != len(current):
         return True
 
-    for old, new in zip(previous, current):
+    for old, new in zip(previous, current, strict=True):
         old_label, old_value, old_unit = _normalise(old)
         new_label, new_value, new_unit = _normalise(new)
         if old_label != new_label or old_unit != new_unit:

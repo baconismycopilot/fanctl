@@ -44,7 +44,7 @@ def device_lock(key: str, timeout: float = 5.0):
                 if deadline <= 0:
                     raise TimeoutError(
                         f"device {key} is busy; another fanctl process holds the lock"
-                    )
+                    ) from None
                 # Deliberately a sleep and not a blocking flock: we want a
                 # diagnosable timeout rather than a daemon wedged forever.
                 import time

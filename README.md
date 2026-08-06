@@ -314,7 +314,18 @@ systemctl --user status openrgb-server
 
 ## Setup
 
-Managed with [uv](https://docs.astral.sh/uv/). Install the CLI onto your PATH:
+Managed with [uv](https://docs.astral.sh/uv/). `make help` lists everything;
+the common ones:
+
+```
+make install     install the CLI onto PATH, editable
+make service     install and enable the user unit
+make logs        follow the daemon's journal
+make restart     restart the daemon after a config change
+make check       clean, lint and test
+```
+
+Or directly:
 
 ```
 uv tool install --editable .

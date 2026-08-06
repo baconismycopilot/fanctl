@@ -340,7 +340,7 @@ def generate_starter(channels: list[dict], has_pump: bool, has_lcd: bool) -> str
         "#",
         "# The LCD firmware has no CPU or GPU widget, so 'liquid' is the only",
         "# built-in readout. Showing anything else means rendering frames on the",
-        "# host, which arrives with the daemon as mode = \"stats\".",
+        '# host, which arrives with the daemon as mode = "stats".',
         "#",
         "# A curve on a Control Hub channel needs the daemon: the hub has no",
         "# device-side curve support, and 'apply' will say so rather than",
@@ -356,9 +356,7 @@ def generate_starter(channels: list[dict], has_pump: bool, has_lcd: bool) -> str
 def load(path: Path | None = None) -> Config:
     path = path or config_path()
     if not path.is_file():
-        raise ConfigError(
-            f"no config at {path}\n  create a starter one with: fanctl config init"
-        )
+        raise ConfigError(f"no config at {path}\n  create a starter one with: fanctl config init")
 
     try:
         with path.open("rb") as fh:

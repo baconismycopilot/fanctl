@@ -18,10 +18,10 @@ and every access here is defensive.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Backend(str, Enum):
+class Backend(StrEnum):
     LIQUIDCTL = "liquidctl"
     OPENRGB = "openrgb"
     NONE = "none"
@@ -138,8 +138,7 @@ def _describe_gaps(device, caps: Capabilities) -> list[str]:
 
     if not caps.speed_profile and caps.speed_channels:
         gaps.append(
-            "no device-side fan curves; temperature-reactive control requires "
-            "the fanctl daemon"
+            "no device-side fan curves; temperature-reactive control requires the fanctl daemon"
         )
 
     if caps.profile_temp_source == "liquid":

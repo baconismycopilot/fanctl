@@ -48,7 +48,7 @@ def opened(device):
         finally:
             try:
                 device.handle.disconnect()
-            except Exception:  # noqa: BLE001 - disconnect failures are not actionable
+            except Exception:
                 pass
 
 

@@ -139,7 +139,7 @@ class Daemon:
             try:
                 liquidctl_be.reset_screen_buckets(self.lcd_target)
                 _LOGGER.info("reclaimed LCD asset buckets")
-            except Exception as exc:  # noqa: BLE001 - not worth failing startup
+            except Exception as exc:
                 _LOGGER.warning("could not reclaim LCD buckets: %s", exc)
 
         if self.lcd_target is not None and self.profile.lcd.mode == "stats":
@@ -197,7 +197,7 @@ class Daemon:
             if readings is None:
                 try:
                     readings = liquidctl_be.read_status(spec.device)
-                except Exception as exc:  # noqa: BLE001 - a stale frame is fine
+                except Exception as exc:
                     _LOGGER.debug("status read for %s failed: %s", spec.device.alias, exc)
                     readings = []
                 cache[spec.device.serial] = readings
@@ -237,7 +237,9 @@ class Daemon:
         for entry in self.managed:
             temp = self.sources.read(entry.source)
             if temp is None:
-                _LOGGER.warning("%s temperature unavailable; leaving %s alone", entry.source, entry.target)
+                _LOGGER.warning(
+                    "%s temperature unavailable; leaving %s alone", entry.source, entry.target
+                )
                 continue
             duty = entry.governor.update(temp, force=force)
             if duty is None:
@@ -280,7 +282,7 @@ class Daemon:
             level = logging.DEBUG if self._pushed_frame else logging.INFO
             _LOGGER.log(level, "pushed LCD frame %s", key)
             self._pushed_frame = True
-        except Exception as exc:  # noqa: BLE001 - never let the screen kill cooling
+        except Exception as exc:
             _LOGGER.warning("LCD frame push failed: %s", exc)
             self._last_frame = None
 
@@ -296,7 +298,7 @@ class Daemon:
             try:
                 liquidctl_be.set_fixed_speed(entry.target.device, entry.target.channel, duty)
                 _LOGGER.info("%s -> fallback %d%%", entry.target, duty)
-            except Exception as exc:  # noqa: BLE001 - best effort on the way out
+            except Exception as exc:
                 _LOGGER.error("could not set fallback on %s: %s", entry.target, exc)
 
     def run(self) -> int:
@@ -331,12 +333,12 @@ class Daemon:
                 _LOGGER.info("resumed after ~%.0fs suspended; re-applying profile", slept)
                 try:
                     self.apply_static()
-                except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                except Exception as exc:
                     _LOGGER.error("re-apply after resume failed: %s", exc)
 
             try:
                 self.tick(force=resumed)
-            except Exception as exc:  # noqa: BLE001 - a bad poll must not stop cooling
+            except Exception as exc:
                 _LOGGER.error("tick failed: %s", exc)
 
         self.shutdown()
@@ -352,6 +354,6 @@ def _read_liquid(device) -> float | None:
         for reading in liquidctl_be.read_status(device):
             if "liquid" in reading.key.lower() and reading.unit == "°C":
                 return float(reading.value)
-    except Exception as exc:  # noqa: BLE001 - transient bus errors are expected
+    except Exception as exc:
         _LOGGER.debug("liquid temperature read failed: %s", exc)
     return None

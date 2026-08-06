@@ -17,6 +17,22 @@ dependencies = [
 [project.scripts]
 fanctl = "fancontrol.cli:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+
+# Pinned explicitly so a lint run here does not depend on whatever global ruff
+# config happens to be installed. Bandit's S rules are left out on purpose:
+# several except-and-carry-on blocks here are deliberate and commented, and a
+# best-effort cleanup path really does have nothing useful to log.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

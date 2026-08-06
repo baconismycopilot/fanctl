@@ -73,7 +73,7 @@ def cmd_status(args) -> int:
         print(_style(f"  {device.serial}  {device.hidraw or ''}", DIM))
         try:
             _print_readings(liquidctl_be.read_status(device))
-        except Exception as exc:  # noqa: BLE001 - report per device, keep going
+        except Exception as exc:
             print(f"  error reading status: {exc}", file=sys.stderr)
     return 0
 
@@ -203,8 +203,7 @@ def cmd_pump_curve(args) -> int:
     )
     if not target.caps.speed_profile:
         print(
-            f"error: {target.device.alias} has no device-side curves; "
-            "use the daemon instead",
+            f"error: {target.device.alias} has no device-side curves; use the daemon instead",
             file=sys.stderr,
         )
         return 2
@@ -235,7 +234,9 @@ def cmd_led_set(args) -> int:
     return apply_led(target, mode, parsed_colors, args.speed, args.direction)
 
 
-def apply_led(target, mode: str, parsed_colors, speed: str, direction: str, indent: str = "") -> int:
+def apply_led(
+    target, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
+) -> int:
     """Route a lighting request to whichever backend owns the channel."""
     backend = target.caps.backend_for_color(target.channel)
 
@@ -291,8 +292,7 @@ def _led_via_openrgb(
     available = caps_mod.modes_for(target.device, target.caps, "ring")
     if mode not in available:
         print(
-            f"error: the ring does not support mode {mode!r}; "
-            f"available: {', '.join(available)}",
+            f"error: the ring does not support mode {mode!r}; available: {', '.join(available)}",
             file=sys.stderr,
         )
         return 2
@@ -314,7 +314,7 @@ def _led_via_openrgb(
 def _fmt_colors(parsed_colors) -> str:
     if not parsed_colors:
         return ""
-    return "  " + " ".join("#%02x%02x%02x" % tuple(c) for c in parsed_colors)
+    return "  " + " ".join(f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}" for c in parsed_colors)
 
 
 # --------------------------------------------------------------------------
@@ -397,7 +397,7 @@ def cmd_config_init(args) -> int:
             for reading in liquidctl_be.read_status(device):
                 if reading.unit == "rpm" and reading.value:
                     populated.add(reading.key.rsplit(" ", 1)[0].strip().lower().replace(" ", ""))
-        except Exception:  # noqa: BLE001 - degrade to emitting nothing per device
+        except Exception:
             continue
 
         # Index by channel number so a fan and its lighting share one alias.
@@ -480,9 +480,7 @@ def _apply_speed(target, setting, dry_run: bool, kind: str, force: bool) -> tupl
         _check_duty(kind, duty, force)
 
     if not target.caps.speed_profile:
-        skipped.append(
-            f"{target} curve needs the daemon (no device-side curve support)"
-        )
+        skipped.append(f"{target} curve needs the daemon (no device-side curve support)")
         return 0, skipped
 
     if setting.source != (target.caps.profile_temp_source or "liquid"):
@@ -587,9 +585,7 @@ def cmd_daemon(args) -> int:
     # liquidctl logs every interpolated point of a curve at INFO -- forty lines
     # for one pump curve, which buries the daemon's own output. Its warnings
     # and errors are still worth seeing.
-    logging.getLogger("liquidctl").setLevel(
-        logging.DEBUG if args.verbose else logging.WARNING
-    )
+    logging.getLogger("liquidctl").setLevel(logging.DEBUG if args.verbose else logging.WARNING)
 
     config = cfg_mod.load()
     name = args.profile or config.daemon.profile
@@ -694,10 +690,8 @@ def cmd_calibrate(args) -> int:
         # Whatever happened, do not leave the fans pinned where a measurement
         # left them and nothing running to move them.
         try:
-            liquidctl_be.set_fixed_speed(
-                target.device, target.channel, config.daemon.fallback_duty
-            )
-        except Exception as exc:  # noqa: BLE001 - report, do not mask the real error
+            liquidctl_be.set_fixed_speed(target.device, target.channel, config.daemon.fallback_duty)
+        except Exception as exc:
             print(f"  could not restore duty on {target}: {exc}", file=sys.stderr)
         if stop_daemon:
             print(_style(f"  restarting {cal_mod.UNIT}", DIM))
@@ -750,7 +744,7 @@ def cmd_calibrate(args) -> int:
     if result.curve:
         points = ", ".join(f"[{t}, {d}]" for t, d in result.curve)
         print(f"\n{_style('suggested', BOLD)}  for {args.channel} in ~/.config/fanctl/config.toml")
-        print(f"  {args.channel} = {{ curve = [{points}], source = \"liquid\" }}")
+        print(f'  {args.channel} = {{ curve = [{points}], source = "liquid" }}')
     return 0
 
 
@@ -881,9 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="ignore the safety duty floors")
     p.set_defaults(func=cmd_apply)
 
-    p = sub.add_parser(
-        "daemon", help="run curves the hardware cannot run itself, and stat frames"
-    )
+    p = sub.add_parser("daemon", help="run curves the hardware cannot run itself, and stat frames")
     p.add_argument("--profile", help="profile to run (default: the first defined)")
     p.add_argument("--dry-run", action="store_true", help="log decisions without writing")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -902,9 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("channel", help="fan channel or alias to characterise, e.g. 'radiator'")
     p.add_argument("--idle", type=float, default=120.0, help="idle baseline seconds (120)")
-    p.add_argument(
-        "--phase", type=float, default=900.0, help="cap per load phase in seconds (900)"
-    )
+    p.add_argument("--phase", type=float, default=900.0, help="cap per load phase in seconds (900)")
     p.add_argument("--cooldown", type=float, default=300.0, help="cooldown seconds (300)")
     p.add_argument(
         "--max-duty", type=int, default=100, help="duty for the full-airflow phase (100)"

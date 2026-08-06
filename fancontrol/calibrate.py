@@ -216,7 +216,7 @@ def _read(sources, device, channel) -> tuple[float | None, float | None, int | N
         for reading in readings:
             if reading.unit == "%" and reading.key.lower().replace(" ", "") == want:
                 duty = int(reading.value)
-    except Exception:  # noqa: BLE001 - a missed sample is not worth aborting for
+    except Exception:
         pass
     return cpu, liquid, duty, rpm
 
@@ -309,10 +309,8 @@ def suggest_curve(
     low = int(idle)  # truncate, not round: the floor should start at or below idle
     high = max(int(hot + 0.999), low + 3)  # ceil, with room for a real ramp
     temps = _spread(low, high, points)
-    duties = [
-        round(min_duty + (max_duty - min_duty) * i / (points - 1)) for i in range(points)
-    ]
-    return list(zip(temps, duties))
+    duties = [round(min_duty + (max_duty - min_duty) * i / (points - 1)) for i in range(points)]
+    return list(zip(temps, duties, strict=True))
 
 
 def run(
@@ -334,9 +332,7 @@ def run(
     result = Result(idle=0.0, plateaus=[], peak=0.0)
 
     def phase(name, duty, limit, stop_early):
-        return _phase(
-            name, duty, limit, target, sources, result, started, report, stop_early
-        )
+        return _phase(name, duty, limit, target, sources, result, started, report, stop_early)
 
     load = None
     try:

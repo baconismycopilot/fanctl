@@ -13,6 +13,7 @@ that simply runs slightly fast, so changes are damped two ways:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 
 def interpolate(curve: list[tuple[int, int]], temp: float) -> int:
@@ -25,7 +26,7 @@ def interpolate(curve: list[tuple[int, int]], temp: float) -> int:
     if temp >= curve[-1][0]:
         return curve[-1][1]
 
-    for (t0, d0), (t1, d1) in zip(curve, curve[1:]):
+    for (t0, d0), (t1, d1) in pairwise(curve):
         if t0 <= temp <= t1:
             if t1 == t0:
                 return d1

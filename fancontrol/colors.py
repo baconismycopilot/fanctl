@@ -64,7 +64,7 @@ def parse_color(text: str) -> list[int]:
 
     try:
         return list(color_from_str(text))
-    except Exception as exc:  # noqa: BLE001 - surface a usable message instead
+    except Exception as exc:
         raise ColorError(
             f"cannot parse colour {text!r}; try ff0000, #ff0000, "
             "rgb(255,0,0), hsv(0,100,100) or hsl(0,100,50)"
