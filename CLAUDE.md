@@ -28,6 +28,12 @@ The tree is clean under `uvx pyright` and worth keeping that way, though pyright
 is not wired into the hook or the Makefile — the liquidctl and OpenRGB surfaces
 are dynamic enough that it earns its keep as an occasional check, not a gate.
 
+CI (`.github/workflows/ci.yml`) runs the same two things on push and PR. Its job
+names — **`lint`** and **`test`** — are required status checks on `main`, matched
+by string: renaming a job without updating branch protection leaves `main`
+waiting forever on a check that never reports. CI checks formatting rather than
+applying it, so `ruff format` locally before pushing.
+
 A single test needs the dev group, since pytest is not in the default dependencies:
 
 ```
