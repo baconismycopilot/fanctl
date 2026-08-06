@@ -29,7 +29,10 @@ _UPLOAD_ATTEMPTS = 3
 @dataclass
 class Reading:
     key: str
-    value: object
+    # liquidctl's status rows are heterogeneous: temperatures and speeds come
+    # back as numbers, control mode as a string, and an unpopulated field as
+    # None. Callers that want a number check the unit first.
+    value: float | int | str | None
     unit: str
 
     @property
@@ -90,9 +93,31 @@ def set_fixed_speed(device, channel: str, duty: int) -> None:
         handle.set_fixed_speed(channel, duty)
 
 
+@contextmanager
+def _quiet_profile_write():
+    """Silence liquidctl's per-degree chatter while a curve is written.
+
+    set_speed_profile logs one INFO line for each of the forty temperature
+    steps it interpolates. That is reasonable for a one-shot command run by
+    hand, but the daemon rewrites the pump curve on every duty change, and
+    forty journal lines a tick buries everything else. Kept under -v, where
+    the per-degree table is the detail you actually asked for.
+    """
+    logger = logging.getLogger("liquidctl")
+    if logger.isEnabledFor(logging.DEBUG):
+        yield
+        return
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
 def set_speed_profile(device, channel: str, profile: list[tuple[int, int]]) -> None:
     """Write a device-side duty curve. Only the Kraken supports this."""
-    with opened(device) as handle:
+    with opened(device) as handle, _quiet_profile_write():
         handle.set_speed_profile(channel, profile)
 
 

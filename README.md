@@ -206,6 +206,15 @@ Behaviours worth knowing:
 - **Stopping raises the fans** to `fallback_duty`. Once the daemon is gone
   nothing manages cooling and the hub holds its last duty forever, which is a
   quiet trap if that duty was an idle 25%.
+- **The pump keeps a hardware failsafe.** The Kraken holds *either* a fixed duty
+  or a curve, never both, so driving it from CPU temperature would otherwise
+  strand it at a bare number if this process were killed — and no shutdown
+  handler runs on SIGKILL. Each decision is therefore written as the floor of a
+  liquid curve, flat to 38°C and ramping to 100% by 45°C. Inside the band the
+  loop actually occupies (28.8–32.7°C) that is indistinguishable from a fixed
+  duty; outside it, the cooler is still on its own curve. Verified with the
+  daemon stopped: a probe curve kneed below current liquid reported 57% at
+  30.4°C, which only an autonomously interpolating device could produce.
 
 ## Calibration
 
@@ -439,6 +448,10 @@ Known rough edges:
   on-device (pump only); everything else needs the daemon running.
 - A CPU-keyed pump curve chases a spiky sensor. `min_step` damps it, and a
   70-second load showed no hunting, but it is worth listening for.
+- The pump's failsafe curve is only as good as its last write. Killed at idle,
+  the cooler keeps a curve floored at 40% rather than a frozen 40% — worth about
+  0.6°C in the worst case, since the loop never gets hot enough for the old
+  liquid-keyed curve to have done much either.
 - The daemon re-applies on resume by detecting the suspend rather than being
   woken by a hook. A hook would need root.
 - LCD bucket exhaustion is worked around, not fixed. The upstream bug is open.

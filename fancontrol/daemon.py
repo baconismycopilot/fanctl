@@ -8,10 +8,11 @@ The Kraken's pump curve can run on the cooler itself, and is written once at
 startup when it does. But the Kraken interpolates against its own liquid probe
 and nothing else, so a pump curve keyed on CPU temperature is scheduled here
 like any hub channel. That is worth doing: measurement on this loop put pump
-speed at 2.6C of CPU temperature and roughly nothing on coolant temperature, so
-the thing a pump curve should react to is the one the cooler cannot read.
+speed at 2.6C of the CPU-to-coolant delta (2.1C of CPU temperature itself) and
+roughly nothing on coolant temperature, so the thing a pump curve should react
+to is the one the cooler cannot read.
 
-Three behaviours are worth knowing about:
+Four behaviours are worth knowing about:
 
 **Nothing is held open.** Devices are opened per operation under the same
 advisory lock the one-shot CLI uses. Holding handles across the daemon's life
@@ -28,6 +29,14 @@ cycle, everything is re-applied on wake.
 more, and the hub will hold whatever duty was last written -- possibly an idle
 25%. Leaving it there is a quiet trap for the next heavy workload, so shutdown
 writes a safe fallback duty instead.
+
+**A managed duty is written as a curve wherever the device supports one.** The
+Kraken is either holding a fixed duty or interpolating a curve, never both, so
+driving the pump from here would otherwise strand it at a bare number the
+moment this process dies -- and shutdown cannot help with a SIGKILL. Writing
+each decision as the floor of a liquid curve keeps the cooler autonomous the
+whole time: it holds our figure across the entire normal band, and still ramps
+itself if the loop ever runs away. See `failsafe_curve`.
 """
 
 from __future__ import annotations
@@ -59,12 +68,27 @@ _SUSPEND_THRESHOLD = 10.0
 # is supposed to own. Reasserting periodically keeps its model honest.
 _REASSERT_TICKS = 60
 
+# Bounds of the emergency ramp on a device-side failsafe curve.
+#
+# The loop on this machine spans 28.8-32.7C, so the floor is held flat well past
+# anything it reaches: inside the normal band the duty this daemon chose is the
+# one that runs, and the curve is purely there to survive us. Past _NORMAL the
+# only readings available are ones that mean the fans have failed or the pump has
+# stalled, which is worth ramping hard for even though nothing is left to notice.
+_NORMAL_LIQUID = 38
+_EMERGENCY_LIQUID = 45
+
+
+def failsafe_curve(duty: int) -> list[tuple[int, int]]:
+    """A liquid curve that holds `duty` through the normal band, then ramps."""
+    return [(20, duty), (_NORMAL_LIQUID, duty), (_EMERGENCY_LIQUID, 100)]
+
 
 @dataclass
 class Managed:
     """One channel the daemon drives from a curve."""
 
-    target: object
+    target: target_mod.Target
     governor: curve_mod.Governor
     source: str
     label: str
@@ -72,12 +96,16 @@ class Managed:
 
 @dataclass
 class DisplaySpec:
-    """One value on the LCD: either a temperature or a channel's RPM."""
+    """One value on the LCD: either a temperature or a channel's RPM.
+
+    `source` and `device`/`channel` are the two halves of that either: exactly
+    one side is filled in, and which one is what `unit` reports.
+    """
 
     label: str
     unit: str
     source: str | None = None  # temperature source, when unit is °C
-    device: object = None  # device to read, when unit is rpm
+    device: dev_mod.Device | None = None  # device to read, when unit is rpm
     channel: str | None = None
 
 
@@ -87,12 +115,14 @@ class Daemon:
     profile: cfg_mod.Profile
     dry_run: bool = False
 
-    devices: list = field(default_factory=list)
+    devices: list[dev_mod.Device] = field(default_factory=list)
     managed: list[Managed] = field(default_factory=list)
-    sources: temp_mod.Sources | None = None
-    lcd_target: object = None
+    # Replaced wholesale in setup(); starting from an empty Sources rather than
+    # None means every read path has one thing to deal with, not two.
+    sources: temp_mod.Sources = field(default_factory=temp_mod.Sources)
+    lcd_target: dev_mod.Device | None = None
     _running: bool = True
-    _last_frame: tuple | None = None
+    _last_frame: list[tuple[str, float | None, str]] | None = None
     _last_lcd_push: float = 0.0
     _pushed_frame: bool = False
     _ticks: int = 0
@@ -130,7 +160,10 @@ class Daemon:
         for fan in self.profile.fans:
             self._manage(fan, target_mod.resolve(self.devices, fan.channel, "fan"))
 
-        if self.lcd_target is not None and self.profile.lcd.mode == "stats" and not self.dry_run:
+        lcd = self.profile.lcd
+        stats = self.lcd_target is not None and lcd is not None and lcd.mode == "stats"
+
+        if stats and not self.dry_run:
             # Buckets persist across processes and reboots; a stale set left by
             # earlier runs makes the first frame fail.
             try:
@@ -139,7 +172,7 @@ class Daemon:
             except Exception as exc:
                 _LOGGER.warning("could not reclaim LCD buckets: %s", exc)
 
-        if self.lcd_target is not None and self.profile.lcd.mode == "stats":
+        if stats:
             self._display = self._build_display_specs()
 
         for key, value in self.sources.describe().items():
@@ -152,6 +185,8 @@ class Daemon:
     def _build_display_specs(self) -> list[DisplaySpec]:
         """Resolve each configured LCD source to something readable."""
         specs: list[DisplaySpec] = []
+        if self.profile.lcd is None:
+            return specs
 
         for source in self.profile.lcd.sources:
             if source in temp_mod.PLAUSIBLE:
@@ -186,8 +221,12 @@ class Daemon:
         out: list[tuple[str, float | None, str]] = []
 
         for spec in self._display:
-            if spec.unit == render_mod.CELSIUS:
+            # Branch on which half of the spec is filled in rather than on the
+            # unit: they agree, but this is the one that says why.
+            if spec.source is not None:
                 out.append((spec.label, self.sources.read(spec.source), spec.unit))
+                continue
+            if spec.device is None or spec.channel is None:
                 continue
 
             readings = cache.get(spec.device.serial)
@@ -258,8 +297,16 @@ class Daemon:
             _LOGGER.debug("reasserting duties on managed channels")
             force = True
 
-        for entry in self.managed:
-            temp = self.sources.read(entry.source)
+        # Everything is read before anything is written. hidraw gives no
+        # guarantee that a response belongs to the request you made, and a
+        # status read chasing a write on the same device has come back with an
+        # impossible liquid temperature. While only hub fans were managed the
+        # order did not matter -- the writes went to a different device than the
+        # reads. Managing the pump puts both on the Kraken.
+        sampled = [(entry, self.sources.read(entry.source)) for entry in self.managed]
+        self._maybe_push_lcd(force=force)
+
+        for entry, temp in sampled:
             if temp is None:
                 _LOGGER.warning(
                     "%s temperature unavailable; leaving %s alone", entry.source, entry.target
@@ -270,9 +317,22 @@ class Daemon:
                 continue
             _LOGGER.info("%s %.1fC -> %d%%", entry.target, temp, duty)
             if not self.dry_run:
-                liquidctl_be.set_fixed_speed(entry.target.device, entry.target.channel, duty)
+                self._write_duty(entry, duty)
 
-        self._maybe_push_lcd(force=force)
+    def _write_duty(self, entry: Managed, duty: int) -> None:
+        """Push a decided duty to the device, as a curve where one is supported.
+
+        A bare duty leaves the cooler with nothing to fall back on. Expressing
+        it as the floor of a liquid curve costs one packet either way and means
+        that whatever happens to this process -- SIGKILL, OOM, a crash between
+        ticks -- the pump is still following a curve rather than frozen at the
+        last number we happened to write.
+        """
+        target = entry.target
+        if not target.caps.speed_profile:
+            liquidctl_be.set_fixed_speed(target.device, target.channel, duty)
+            return
+        liquidctl_be.set_speed_profile(target.device, target.channel, failsafe_curve(duty))
 
     def _maybe_push_lcd(self, force: bool = False) -> None:
         lcd = self.profile.lcd
@@ -323,7 +383,7 @@ class Daemon:
                 _LOGGER.info("would set %s to fallback %d%%", entry.target, duty)
                 continue
             try:
-                liquidctl_be.set_fixed_speed(entry.target.device, entry.target.channel, duty)
+                self._write_duty(entry, duty)
                 _LOGGER.info("%s -> fallback %d%%", entry.target, duty)
             except Exception as exc:
                 _LOGGER.error("could not set fallback on %s: %s", entry.target, exc)
@@ -380,7 +440,7 @@ def _read_liquid(device) -> float | None:
     try:
         for reading in liquidctl_be.read_status(device):
             if "liquid" in reading.key.lower() and reading.unit == "°C":
-                return float(reading.value)
+                return None if reading.value is None else float(reading.value)
     except Exception as exc:
         _LOGGER.debug("liquid temperature read failed: %s", exc)
     return None
