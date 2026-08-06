@@ -42,6 +42,13 @@ MODES: dict[str, ModeSpec] = {
     "rainbow-pulse": ModeSpec(None, "Rainbow Pulse"),
     "rainbow-flow": ModeSpec(None, "Rainbow Flow"),
     "direct": ModeSpec(None, "Direct"),
+    # ENE DRAM animations. 'rainbow' is a distinct mode from the ring's
+    # 'super-rainbow'; the names are matched exactly, so they do not collide.
+    "flashing": ModeSpec(None, "Flashing"),
+    "rainbow": ModeSpec(None, "Rainbow"),
+    "chase": ModeSpec(None, "Chase"),
+    "chase-fade": ModeSpec(None, "Chase Fade"),
+    "random-flicker": ModeSpec(None, "Random Flicker"),
 }
 
 ANIMATION_SPEEDS = ["slowest", "slower", "normal", "faster", "fastest"]

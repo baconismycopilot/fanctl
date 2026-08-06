@@ -15,6 +15,8 @@ fanctl led set hub:2 fixed 00ff00      # -> liquidctl
 fanctl led set ring spectrum-wave      # -> openrgb, same syntax
 fanctl led set ring fading ff0000 0000ff --speed faster
 fanctl led set ring off
+fanctl led set memory fixed 00ccff     # both DIMMs
+fanctl led set memory:2 chase ff0000 --speed slower
 
 fanctl lcd brightness 80
 fanctl lcd liquid
@@ -44,6 +46,7 @@ No single tool covers this hardware.
 | --- | --- | --- |
 | Fans, pump, device curves, LCD, hub RGB | liquidctl (imported as a library) | Kraken `1e71:3012`, Control Hub `1e71:2022` |
 | Pump light ring | OpenRGB SDK on `127.0.0.1:6742` | Kraken only |
+| RGB memory | OpenRGB SDK on `127.0.0.1:6742` | G.Skill DIMMs, ENE controller on the SMBus |
 
 The Kraken 2024 Elite **RGB** cannot set a colour through liquidctl at all:
 `kraken3.py` maps product `0x3012` to an empty colour-channel dict, and the
@@ -51,6 +54,9 @@ upstream guide states that controlling the light ring is not yet supported.
 OpenRGB drives it as a generic Hue 2 device on the same hidraw node — 24 LEDs on
 zone 0. Conversely OpenRGB fails to size the hub's F240 accessory (reports 0
 LEDs) where liquidctl detects it correctly, so hub RGB stays on liquidctl.
+
+Memory is OpenRGB-only by nature rather than by gap: the DIMMs answer on the
+SMBus at their SPD addresses, so there is no USB device for liquidctl to find.
 
 Run `fanctl caps` rather than trusting this table; it derives from the
 installed drivers, so a liquidctl upgrade that closes a gap shows up immediately.
@@ -73,6 +79,45 @@ channel reads 0 rpm. Nothing should ever be scheduled onto it.
 Zone 0 on the Kraken is the pump light ring — confirmed visually, and it is the
 only populated zone on that device.
 
+- **RGB memory** — two G.Skill DIMMs, 8 LEDs each, on the SMBus at `0x71` and
+  `0x73`.
+
+## RGB memory
+
+Memory is the one target that does not go through device discovery. There is no
+liquidctl driver behind a DIMM, no USB serial to key an alias on, and no hidraw
+node for `lock.py` to guard, so it gets its own namespace instead of being forced
+through `targets.resolve()`.
+
+```
+fanctl led set memory fixed 00ccff       # every stick
+fanctl led set memory:1 fixed ff0000     # one stick
+fanctl led set memory off
+```
+
+`memory`, `mem`, `ram` and `dram` all mean the same thing. Sticks are numbered
+by **SMBus address**, not by OpenRGB's detection order, so `memory:1` keeps
+meaning the same DIMM across reboots. `fanctl caps` prints the addresses. Which
+physical slot that is, only looking at the machine will tell you.
+
+Fewer colours than LEDs is not an error — they cycle across the stick, so
+`fanctl led set memory fixed ff0000 0000ff` gives an alternating pattern down
+the eight LEDs.
+
+The controller disagrees with the pump ring on two things worth knowing, since
+both are silent failures rather than errors:
+
+- Its modes are `PER_LED`, so colours go to the zone's LED buffer. The ring's
+  are `MODE_SPECIFIC` and carry their own palette. Writing to the wrong one is
+  accepted and does nothing.
+- Its speed scale runs **backwards** — `speed_min` 4 down to `speed_max` 0,
+  where the ring runs 0 up to 4. Clamping to those endpoints pinned every DRAM
+  animation to one speed, so the canonical name is interpolated across the range
+  in whichever order the mode declares it.
+
+It also has a real `Off` mode, where the ring has none and off is emulated by
+holding every LED black.
+
 ## Profiles
 
 `~/.config/fanctl/config.toml` holds named profiles — whole-machine states
@@ -87,6 +132,7 @@ Channel aliases are the point of the file:
 radiator = "hub:2"     # F240, exhaust over the radiator
 intake   = "hub:4"     # F360, front intake
 ring     = "ring"
+memory   = "memory"    # both DIMMs; memory:1 / memory:2 address one
 ```
 
 The numeric shorthand is deliberate: `hub:2` resolves to `fan2` in a `fans`
@@ -306,11 +352,15 @@ polls these nodes every second through its own embedded liquidctl:
 systemctl is-enabled coolercontrold   # expect: disabled
 ```
 
-The OpenRGB SDK server is required for ring control:
+The OpenRGB SDK server is required for the ring and for memory:
 
 ```
 systemctl --user status openrgb-server
 ```
+
+Memory additionally needs the `i2c-dev` module loaded and an OpenRGB build with
+I2C detection enabled — without it the DIMMs are simply absent from `fanctl
+caps` rather than failing loudly.
 
 ## Setup
 

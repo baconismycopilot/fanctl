@@ -11,6 +11,7 @@ from . import caps as caps_mod
 from . import colors as color_mod
 from . import config as cfg_mod
 from . import devices as dev_mod
+from . import memory as mem_mod
 from . import targets as target_mod
 from . import temps as temp_mod
 from .backends import liquidctl_be, openrgb_be
@@ -129,7 +130,29 @@ def cmd_caps(args) -> int:
             print(f"  {_style('gaps', DIM)}")
             for gap in caps.gaps:
                 print(_style(f"    - {gap}", DIM))
+
+    if client is not None:
+        _print_memory_caps(client)
     return 0
+
+
+def _print_memory_caps(client) -> None:
+    sticks = mem_mod.discover(client)
+    if not sticks:
+        return
+    print()
+    print(f"{_style('RGB memory', BOLD)}  {_style('[memory]', DIM)}")
+    for stick in sticks:
+        name = stick.zone.device_name
+        print(f"  {stick.label:<18} {name} at {stick.address} ({stick.zone.leds} LEDs)  [openrgb]")
+    print(_style(f"  {'  modes':<18} {', '.join(mem_mod.modes_for(sticks[0]))}", DIM))
+    print(_style("  gaps", DIM))
+    print(
+        _style(
+            "    - no liquidctl driver and no serial number; sticks are numbered by SMBus address",
+            DIM,
+        )
+    )
 
 
 def cmd_init(args) -> int:
@@ -221,16 +244,21 @@ def cmd_pump_curve(args) -> int:
 
 
 def cmd_led_set(args) -> int:
-    found = dev_mod.discover()
-    target = target_mod.resolve(found, args.target, "led")
     mode = args.mode.strip().lower()
-
     if mode not in color_mod.MODES:
         known = ", ".join(sorted(color_mod.MODES))
         print(f"error: unknown mode {mode!r}; known modes: {known}", file=sys.stderr)
         return 2
 
     parsed_colors = [color_mod.parse_color(c) for c in args.colors]
+
+    # Memory is resolved before device discovery, not through it: there is no
+    # liquidctl device behind a DIMM to resolve against.
+    if mem_mod.is_memory(args.target):
+        return _led_via_memory(args.target, mode, parsed_colors, args.speed, args.direction)
+
+    found = dev_mod.discover()
+    target = target_mod.resolve(found, args.target, "led")
     return apply_led(target, mode, parsed_colors, args.speed, args.direction)
 
 
@@ -290,24 +318,95 @@ def _led_via_openrgb(
 
     caps_mod.enrich_with_openrgb(target.device, target.caps, ring)
     available = caps_mod.modes_for(target.device, target.caps, "ring")
+    return _write_zone(
+        client,
+        ring,
+        str(target),
+        "the ring",
+        mode,
+        available,
+        parsed_colors,
+        speed,
+        direction,
+        indent,
+    )
+
+
+def _led_via_memory(
+    token: str, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
+) -> int:
+    try:
+        client = openrgb_be.connect()
+        sticks = mem_mod.select(mem_mod.discover(client), token)
+    except (openrgb_be.OpenRGBUnavailable, target_mod.TargetError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Check the mode once against what every selected stick can do, rather than
+    # per stick: an unsupported mode is one typo, not one failure per DIMM.
+    available = sorted(set.intersection(*(set(mem_mod.modes_for(s)) for s in sticks)))
     if mode not in available:
         print(
-            f"error: the ring does not support mode {mode!r}; available: {', '.join(available)}",
+            f"error: RGB memory does not support mode {mode!r}; available: {', '.join(available)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    worst = 0
+    for stick in sticks:
+        code = _write_zone(
+            client,
+            stick.zone,
+            stick.label,
+            stick.label,
+            mode,
+            available,
+            parsed_colors,
+            speed,
+            direction,
+            indent,
+        )
+        worst = max(worst, code)
+    return worst
+
+
+def _write_zone(
+    client,
+    zone,
+    label: str,
+    description: str,
+    mode: str,
+    available: list[str],
+    parsed_colors,
+    speed: str,
+    direction: str,
+    indent: str = "",
+) -> int:
+    """Send one canonical lighting request to one OpenRGB zone."""
+    if mode not in available:
+        print(
+            f"error: {description} does not support mode {mode!r}; "
+            f"available: {', '.join(available)}",
             file=sys.stderr,
         )
         return 2
 
     native = color_mod.canonical_for_openrgb(mode)  # None for 'off'
-    speed_idx = color_mod.ANIMATION_SPEEDS.index(speed)
-    direction_idx = color_mod.DIRECTIONS.index(direction)
-
     try:
-        openrgb_be.set_ring(client, ring, native, parsed_colors, speed_idx, direction_idx)
+        openrgb_be.set_zone(
+            client,
+            zone,
+            native,
+            parsed_colors,
+            speed=color_mod.ANIMATION_SPEEDS.index(speed),
+            speed_steps=len(color_mod.ANIMATION_SPEEDS),
+            direction=color_mod.DIRECTIONS.index(direction),
+        )
     except openrgb_be.OpenRGBUnavailable as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"{indent}{target}  {mode}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
+    print(f"{indent}{label}  {mode}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
     return 0
 
 
@@ -419,6 +518,14 @@ def cmd_config_init(args) -> int:
 
         if caps.ring_zone is not None:
             channels.append({"label": "ring", "target": "ring", "fan": False, "led": True})
+
+    # Memory is one alias for every stick. Per-stick colours are a thing you go
+    # looking for; whole-set is what a profile almost always wants.
+    try:
+        if mem_mod.discover(openrgb_be.connect()):
+            channels.append({"label": "memory", "target": "memory", "fan": False, "led": True})
+    except openrgb_be.OpenRGBUnavailable:
+        pass
 
     text = cfg_mod.generate_starter(channels, has_pump, has_lcd)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -532,8 +639,16 @@ def apply_static_profile(
         skipped += s
 
     for led in profile.leds:
-        target = target_mod.resolve(found, led.channel, "led")
         colors = [color_mod.parse_color(c) for c in led.colors]
+        if mem_mod.is_memory(led.channel):
+            if dry_run:
+                print(f"{indent}would set {led.channel}  {led.mode}{_fmt_colors(colors)}")
+                continue
+            if _led_via_memory(led.channel, led.mode, colors, led.speed, led.direction, indent):
+                failures += 1
+            continue
+
+        target = target_mod.resolve(found, led.channel, "led")
         if dry_run:
             print(f"{indent}would set {target}  {led.mode}{_fmt_colors(colors)}")
             continue
@@ -850,7 +965,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_led = sub.add_parser("led", help="lighting control across both backends")
     led_sub = p_led.add_subparsers(dest="led_command", required=True)
     p = led_sub.add_parser("set", help="set a lighting mode, e.g. 'led set ring fixed ff0000'")
-    p.add_argument("target", help="channel, e.g. hub:led2, hub:sync, or ring")
+    p.add_argument(
+        "target",
+        help="channel: hub:led2, hub:sync, ring, memory (every stick) or memory:1",
+    )
     p.add_argument("mode", help="canonical mode name; see 'fanctl caps'")
     p.add_argument("colors", nargs="*", help="colours: ff0000, #ff0000, rgb(), hsv(), hsl()")
     p.add_argument(

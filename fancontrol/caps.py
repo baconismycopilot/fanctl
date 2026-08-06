@@ -155,10 +155,10 @@ def enrich_with_openrgb(device, caps: Capabilities, ring) -> None:
     """Fold live OpenRGB zone data into an already-derived Capabilities."""
     if ring is not None:
         caps.ring_leds = ring.leds
-        caps.ring_modes = sorted(_canonical_modes(ring.modes, "openrgb"))
+        caps.ring_modes = sorted(canonical_modes(ring.modes, "openrgb"))
 
 
-def _canonical_modes(backend_names, backend: str) -> list[str]:
+def canonical_modes(backend_names, backend: str) -> list[str]:
     """Translate backend mode spellings back into canonical fanctl names."""
     from .colors import MODES
 
@@ -181,7 +181,7 @@ def liquidctl_modes(device) -> list[str]:
     table = getattr(type(device.handle), "_COLOR_MODES", None)
     if not table:
         return []
-    return sorted(_canonical_modes(table.keys(), "liquidctl"))
+    return sorted(canonical_modes(table.keys(), "liquidctl"))
 
 
 def modes_for(device, caps: Capabilities, channel: str) -> list[str]:
