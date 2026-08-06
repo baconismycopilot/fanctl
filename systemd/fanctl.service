@@ -1,6 +1,6 @@
 [Unit]
 Description=fanctl curve daemon
-Documentation=https://github.com/baconismycopilot/fancontrol
+Documentation=https://github.com/baconismycopilot/fanctl
 # The ring backend talks to the OpenRGB SDK server. The daemon degrades to a
 # warning without it, so this is Wants= rather than Requires=: no lighting is a
 # far better outcome than no fan control.
