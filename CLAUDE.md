@@ -13,9 +13,20 @@ make check                       # clean, lint, test -- run this before committi
 make test                        # uv run --group dev pytest -q
 make lint                        # ruff format, then ruff check
 make install                     # uv tool install --editable . (puts fanctl on PATH)
+make hooks                       # install the pre-commit ruff gate
 make service                     # install + enable the systemd --user unit
 make restart / logs / status     # control and watch the running daemon
 ```
+
+The pre-commit hook runs ruff (check `--fix`, then format) on staged Python via
+`uv run`, so it uses the ruff in `uv.lock` rather than a second one from
+pre-commit's mirrors. It **fails the commit even when it fixed everything** —
+fixes land in the working tree, not in what you staged, so you re-read and
+`git add`. Tests deliberately stay out of it; `make check` is the full gate.
+
+The tree is clean under `uvx pyright` and worth keeping that way, though pyright
+is not wired into the hook or the Makefile — the liquidctl and OpenRGB surfaces
+are dynamic enough that it earns its keep as an occasional check, not a gate.
 
 A single test needs the dev group, since pytest is not in the default dependencies:
 
