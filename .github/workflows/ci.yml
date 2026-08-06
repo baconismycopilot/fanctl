@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here needs an older run to finish; a newer push supersedes it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # `make lint` formats in place, which is right at a terminal and wrong
+      # here: CI should report that something is unformatted, not quietly fix
+      # it in a checkout nobody keeps.
+      - run: uv run --group dev ruff format --check fancontrol/ tests/
+      - run: uv run --group dev ruff check fancontrol/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # The suite is pure host-side logic -- fakes for every device -- so it
+      # runs on a machine with no NZXT hardware and no hidraw nodes. Anything
+      # that needs the hardware is verified by hand and written up in the
+      # README instead; see the calibration and failsafe sections there.
+      - run: uv run --group dev pytest -q
