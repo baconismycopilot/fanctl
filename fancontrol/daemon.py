@@ -23,7 +23,7 @@ daemon runs. Coexisting with the CLI matters more than saving a connect.
 rootless as a user service, so instead the loop compares CLOCK_BOOTTIME against
 CLOCK_MONOTONIC. Only the former advances across suspend, so a divergence means
 the machine slept -- and since these devices keep no state through a power
-cycle, everything is re-applied on wake.
+cycle, everything is re-initialised and re-applied on wake.
 
 **Exit raises the fans.** When the daemon stops, nothing is managing cooling any
 more, and the hub will hold whatever duty was last written -- possibly an idle
@@ -130,10 +130,41 @@ class Daemon:
 
     # ------------------------------------------------------------------
 
+    def _initialize_devices(self) -> None:
+        """Put every device back into a state where it will report status.
+
+        The Control Hub accepts a duty whether or not it has been initialised,
+        but only begins streaming the 0x67 0x02 status reports a read consumes
+        once `initialize` has asked it to. Skipping this leaves the daemon
+        working perfectly while every read fails: `fanctl status` burns its
+        twelve read attempts on the 0xff 0x03 chatter the hub sends regardless,
+        and asserts `missing messages`. Nothing else on the system does this --
+        not the unit, not the CLI unless invoked by hand -- so it belongs here,
+        on the one path that runs at boot and again on wake.
+        """
+        if self.dry_run:
+            return
+        for device in self.devices:
+            try:
+                liquidctl_be.initialize(device)
+                # Logged because it is otherwise invisible: the symptom of a
+                # missing init shows up in a separate process reading status,
+                # with nothing in the journal to connect it back to here.
+                _LOGGER.info("initialised %s", device.alias)
+            except Exception as exc:
+                # One device that will not initialise is not a reason to leave
+                # the rest of the machine uncooled.
+                _LOGGER.error("could not initialise %s: %s", device.alias, exc)
+
     def setup(self) -> None:
         self.devices = dev_mod.discover()
         if not self.devices:
             raise RuntimeError("no supported NZXT devices found")
+
+        # Before anything reads or writes: liquidctl's own contract is that no
+        # method other than connect/disconnect is called until the device has
+        # been initialised.
+        self._initialize_devices()
 
         liquid_device = None
         for device in self.devices:
@@ -419,6 +450,11 @@ class Daemon:
             if resumed:
                 _LOGGER.info("resumed after ~%.0fs suspended; re-applying profile", slept)
                 try:
+                    # A resumed device is in the same state as a cold-booted
+                    # one: it has stopped reporting, and its LED accessories are
+                    # not addressable until it has been asked to look for them
+                    # again. Re-initialise before re-applying, not after.
+                    self._initialize_devices()
                     self.apply_static()
                 except Exception as exc:
                     _LOGGER.error("re-apply after resume failed: %s", exc)
