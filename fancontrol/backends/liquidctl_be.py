@@ -13,6 +13,7 @@ caps.py so a breaking upgrade has a small blast radius.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,10 +42,27 @@ class Reading:
         return self.unit == "rpm" and self.value == 0
 
 
+def _detach_readonly_hwmon(handle) -> None:
+    """Make liquidctl talk HID directly when the kernel driver's sysfs is root-only.
+
+    With nzxt_kraken3 bound, liquidctl routes duty writes through hwmon sysfs
+    instead of hidraw. Those attributes are root-owned (pwm1 0644, the
+    temp1_auto_point*_pwm curve points 0200), so every write fails with EACCES,
+    and initialize() skips the device entirely, assuming the kernel already
+    did it. hidraw is covered by uaccess, so dropping the hwmon handle makes
+    liquidctl take its own direct path, which is the same one it uses for
+    devices with no kernel driver at all.
+    """
+    hwmon = getattr(handle, "_hwmon", None)
+    if hwmon is not None and not os.access(hwmon.path / "pwm1", os.W_OK):
+        handle._hwmon = None
+
+
 @contextmanager
 def opened(device):
     """Connect a device for the duration of a block, serialised by its lock."""
     with device_lock(device.serial):
+        _detach_readonly_hwmon(device.handle)
         device.handle.connect()
         try:
             yield device.handle
