@@ -9,6 +9,11 @@ The RTX 5090 Founders Edition here exposes three one-LED zones ("0 - SINGLE
 COLOR" through "2 - SINGLE COLOR") and exactly two modes, Off and Direct. With
 no Static mode to hold a colour, 'fixed' is sent as Direct, one colour per LED.
 
+On that card the write is accepted and the lights come on, but white: a cyan
+request showed white by eye. That matches what the owner remembers as a limit of
+the FE's lighting rather than anything in this path, so treat a colour here as
+"lights on" until a card proves otherwise.
+
 Zones are numbered by the card's own zone index, which the firmware fixes, so
 'gpu:1' keeps meaning the same light across reboots. Plain 'gpu' is every zone.
 """
