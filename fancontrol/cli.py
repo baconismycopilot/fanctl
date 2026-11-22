@@ -794,6 +794,38 @@ def cmd_daemon(args) -> int:
     return runner.run()
 
 
+def _print_clock_finding(result) -> None:
+    """Say what the CPU did with the cooling, when temperature cannot.
+
+    A CPU pinned at its thermal limit reads the same temperature at any pump or
+    fan speed, and spends the difference on clock instead. That is the number
+    worth reading then -- most often for the pump, which moves heat off the die
+    rather than out of the loop.
+    """
+    slow, fast = result.hot_slow, result.hot_fast
+    if slow is None or fast is None or slow.duty == fast.duty:
+        return
+    if None in (slow.cpu, fast.cpu, slow.mhz, fast.mhz):
+        return
+    gained = fast.mhz - slow.mhz
+    pct = 100.0 * gained / slow.mhz if slow.mhz else 0.0
+    print(
+        _style(
+            f"\n  At {fast.duty}% versus {slow.duty}%: CPU {fast.cpu - slow.cpu:+.1f}C, "
+            f"clock {gained:+.0f} MHz ({pct:+.1f}%).",
+            DIM,
+        )
+    )
+    if abs(fast.cpu - slow.cpu) < 0.5:
+        print(
+            _style(
+                "  CPU temperature held still, so it was at its thermal limit; the clock\n"
+                "  change is what the extra cooling bought.",
+                DIM,
+            )
+        )
+
+
 def cmd_calibrate(args) -> int:
     from . import calibrate as cal_mod
     from .daemon import _read_liquid
@@ -876,6 +908,8 @@ def cmd_calibrate(args) -> int:
             bits.append(f"{sample.duty:3d}%")
         if sample.rpm is not None:
             bits.append(f"{sample.rpm:5.0f} rpm")
+        if sample.mhz is not None:
+            bits.append(f"{sample.mhz:5.0f} MHz")
         print("  ".join(bits), flush=True)
 
     def note(message) -> None:
@@ -927,8 +961,14 @@ def cmd_calibrate(args) -> int:
     print(f"  idle            {result.idle:5.1f} C")
     for plateau in result.plateaus:
         suffix = "" if plateau.settled else "  (still climbing)"
-        print(f"  load at {plateau.duty:3d}%     {plateau.temp:5.1f} C{suffix}")
+        extra = ""
+        if plateau.cpu is not None:
+            extra += f"   cpu {plateau.cpu:5.1f} C"
+        if plateau.mhz is not None:
+            extra += f"   {plateau.mhz:5.0f} MHz"
+        print(f"  load at {plateau.duty:3d}%     {plateau.temp:5.1f} C{extra}{suffix}")
     print(f"  peak            {result.peak:5.1f} C")
+    _print_clock_finding(result)
 
     hot, cold = result.hot_slow, result.hot_fast
     if hot is not None and cold is not None and result.conclusive:

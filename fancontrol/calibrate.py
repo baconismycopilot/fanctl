@@ -34,6 +34,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import caps as caps_mod
 from . import temps as temp_mod
@@ -62,6 +63,15 @@ MIN_LOAD_SECONDS = 300.0
 CPU_LIMIT = 96.0
 LIQUID_LIMIT = 45.0
 
+# Clock speed is recorded alongside temperature because temperature stops being
+# informative under this load. The 9800X3D here holds Tctl at 95.2C, sd 0.00,
+# under all-core load whatever the pump does -- its boost logic converts any
+# extra cooling into clock rather than into a lower temperature. A pump run that
+# read only temperatures came back identical at 30% and 100%, which says nothing
+# about the pump. Package power would be the other witness, but RAPL energy_uj
+# is root-only on this kernel. scaling_cur_freq is world-readable.
+CPUFREQ_ROOT = Path("/sys/devices/system/cpu")
+
 
 class CalibrationError(RuntimeError):
     pass
@@ -75,6 +85,7 @@ class Sample:
     liquid: float | None
     duty: int | None
     rpm: float | None
+    mhz: float | None = None
 
 
 @dataclass
@@ -84,6 +95,8 @@ class Plateau:
     duty: int
     temp: float
     settled: bool  # False means it was still climbing when the phase ran out
+    cpu: float | None = None
+    mhz: float | None = None
 
 
 @dataclass
@@ -205,7 +218,21 @@ def _settled(samples: list[Sample], min_elapsed: float = 0.0) -> bool:
     return max(window) - min(window) < SETTLE_DELTA
 
 
-def _read(sources, device, channel) -> tuple[float | None, float | None, int | None, float | None]:
+def _cpu_mhz() -> float | None:
+    """Mean current clock across every core, in MHz."""
+    values = []
+    for path in CPUFREQ_ROOT.glob("cpu[0-9]*/cpufreq/scaling_cur_freq"):
+        try:
+            values.append(int(path.read_text().strip()) / 1000.0)
+        except (OSError, ValueError):
+            continue
+    return sum(values) / len(values) if values else None
+
+
+def _read(
+    sources, device, channel
+) -> tuple[float | None, float | None, int | None, float | None, float | None]:
+    mhz = _cpu_mhz()
     cpu = sources.read("cpu")
     liquid = sources.read("liquid")
     duty = rpm = None
@@ -218,7 +245,7 @@ def _read(sources, device, channel) -> tuple[float | None, float | None, int | N
                 duty = None if reading.value is None else int(reading.value)
     except Exception:
         pass
-    return cpu, liquid, duty, rpm
+    return cpu, liquid, duty, rpm, mhz
 
 
 def _phase(
@@ -245,9 +272,15 @@ def _phase(
         if elapsed >= limit:
             return samples
 
-        cpu, liquid, actual, rpm = _read(sources, target.device, target.channel)
+        cpu, liquid, actual, rpm, mhz = _read(sources, target.device, target.channel)
         sample = Sample(
-            elapsed=now - started, phase=name, cpu=cpu, liquid=liquid, duty=actual, rpm=rpm
+            elapsed=now - started,
+            phase=name,
+            cpu=cpu,
+            liquid=liquid,
+            duty=actual,
+            rpm=rpm,
+            mhz=mhz,
         )
         samples.append(sample)
         result.samples.append(sample)
@@ -359,7 +392,17 @@ def run(
                 continue
             tail = values[-3:]
             settled = _settled(samples)
-            plateau = Plateau(duty=duty, temp=_median(tail), settled=settled)
+            # CPU and clock over a longer tail than liquid: both move within a
+            # second of a pump change, so the whole settled stretch is usable.
+            cpus = [s.cpu for s in samples[-10:] if s.cpu is not None]
+            clocks = [s.mhz for s in samples[-10:] if s.mhz is not None]
+            plateau = Plateau(
+                duty=duty,
+                temp=_median(tail),
+                settled=settled,
+                cpu=_median(cpus) if cpus else None,
+                mhz=_median(clocks) if clocks else None,
+            )
             result.plateaus.append(plateau)
             note(
                 f"fans {duty}%: liquid {plateau.temp:.1f}C"
@@ -396,7 +439,7 @@ def run(
 def write_csv(result: Result, path: str) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["elapsed", "phase", "cpu", "liquid", "duty", "rpm"])
+        writer.writerow(["elapsed", "phase", "cpu", "liquid", "duty", "rpm", "mhz"])
         for s in result.samples:
             writer.writerow(
                 [
@@ -406,5 +449,6 @@ def write_csv(result: Result, path: str) -> None:
                     "" if s.liquid is None else f"{s.liquid:.1f}",
                     "" if s.duty is None else s.duty,
                     "" if s.rpm is None else f"{s.rpm:.0f}",
+                    "" if s.mhz is None else f"{s.mhz:.0f}",
                 ]
             )
