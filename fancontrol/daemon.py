@@ -50,6 +50,7 @@ from . import caps as caps_mod
 from . import config as cfg_mod
 from . import curves as curve_mod
 from . import devices as dev_mod
+from . import gpu as gpu_mod
 from . import memory as mem_mod
 from . import render as render_mod
 from . import targets as target_mod
@@ -317,7 +318,7 @@ class Daemon:
         """The profile's lighting that goes through OpenRGB rather than liquidctl."""
         out = []
         for led in self.profile.leds:
-            if mem_mod.is_memory(led.channel):
+            if mem_mod.is_memory(led.channel) or gpu_mod.is_gpu(led.channel):
                 out.append(led)
                 continue
             try:
