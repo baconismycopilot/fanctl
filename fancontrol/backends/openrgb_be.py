@@ -108,6 +108,24 @@ def find_memory(client) -> list[Zone]:
     return sorted(zones, key=lambda z: (z.address or "", z.device_id, z.zone_id))
 
 
+def find_gpu(client) -> list[Zone]:
+    """Every graphics-card lighting zone, ordered by card then by zone index.
+
+    The FE card reports no serial and an empty location, so the card's name is
+    the only per-card key available; zone indices are fixed by its firmware.
+    """
+    from openrgb.utils import DeviceType
+
+    zones = [
+        _zone(dev, zone)
+        for dev in client.devices
+        if dev.type == DeviceType.GPU
+        for zone in dev.zones
+        if zone.leds
+    ]
+    return sorted(zones, key=lambda z: (z.device_name, z.location, z.zone_id))
+
+
 def _find_mode(zone: Zone, device, name: str):
     for mode in device.modes:
         if mode.name.strip().lower() == name.strip().lower():

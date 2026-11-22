@@ -11,6 +11,7 @@ from . import caps as caps_mod
 from . import colors as color_mod
 from . import config as cfg_mod
 from . import devices as dev_mod
+from . import gpu as gpu_mod
 from . import memory as mem_mod
 from . import targets as target_mod
 from . import temps as temp_mod
@@ -133,6 +134,7 @@ def cmd_caps(args) -> int:
 
     if client is not None:
         _print_memory_caps(client)
+        _print_gpu_caps(client)
     return 0
 
 
@@ -153,6 +155,20 @@ def _print_memory_caps(client) -> None:
             DIM,
         )
     )
+
+
+def _print_gpu_caps(client) -> None:
+    zones = gpu_mod.discover(client)
+    if not zones:
+        return
+    print()
+    print(f"{_style(zones[0].zone.device_name, BOLD)}  {_style('[gpu]', DIM)}")
+    for zone in zones:
+        print(f"  {zone.label:<18} {zone.zone.zone_name} ({zone.zone.leds} LEDs)  [openrgb]")
+    print(_style(f"  {'  modes':<18} {', '.join(gpu_mod.modes_for(zones[0]))}", DIM))
+    if not gpu_mod.has_static(zones[0]):
+        print(_style("  gaps", DIM))
+        print(_style("    - no Static mode; 'fixed' is sent as Direct", DIM))
 
 
 def cmd_init(args) -> int:
@@ -256,6 +272,8 @@ def cmd_led_set(args) -> int:
     # liquidctl device behind a DIMM to resolve against.
     if mem_mod.is_memory(args.target):
         return _led_via_memory(args.target, mode, parsed_colors, args.speed, args.direction)
+    if gpu_mod.is_gpu(args.target):
+        return _led_via_gpu(args.target, mode, parsed_colors, args.speed, args.direction)
 
     found = dev_mod.discover()
     target = target_mod.resolve(found, args.target, "led")
@@ -372,6 +390,44 @@ def _led_via_memory(
     return worst
 
 
+def _led_via_gpu(
+    token: str, mode: str, parsed_colors, speed: str, direction: str, indent: str = ""
+) -> int:
+    try:
+        client = openrgb_be.connect()
+        zones = gpu_mod.select(gpu_mod.discover(client), token)
+    except (openrgb_be.OpenRGBUnavailable, target_mod.TargetError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    available = sorted(set.intersection(*(set(gpu_mod.modes_for(z)) for z in zones)))
+    if mode not in available:
+        print(
+            f"error: GPU lighting does not support mode {mode!r}; "
+            f"available: {', '.join(available)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    worst = 0
+    for zone in zones:
+        code = _write_zone(
+            client,
+            zone.zone,
+            zone.label,
+            zone.label,
+            gpu_mod.native_mode(zone, mode),
+            available,
+            parsed_colors,
+            speed,
+            direction,
+            indent,
+            shown=mode,
+        )
+        worst = max(worst, code)
+    return worst
+
+
 def _write_zone(
     client,
     zone,
@@ -383,6 +439,7 @@ def _write_zone(
     speed: str,
     direction: str,
     indent: str = "",
+    shown: str | None = None,
 ) -> int:
     """Send one canonical lighting request to one OpenRGB zone."""
     if mode not in available:
@@ -408,7 +465,8 @@ def _write_zone(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"{indent}{label}  {mode}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
+    shown = shown or mode
+    print(f"{indent}{label}  {shown}{_fmt_colors(parsed_colors)}  {_style('[openrgb]', DIM)}")
     return 0
 
 
@@ -526,6 +584,12 @@ def cmd_config_init(args) -> int:
     try:
         if mem_mod.discover(openrgb_be.connect()):
             channels.append({"label": "memory", "target": "memory", "fan": False, "led": True})
+    except openrgb_be.OpenRGBUnavailable:
+        pass
+
+    try:
+        if gpu_mod.discover(openrgb_be.connect()):
+            channels.append({"label": "gpu", "target": "gpu", "fan": False, "led": True})
     except openrgb_be.OpenRGBUnavailable:
         pass
 
@@ -649,6 +713,13 @@ def apply_static_profile(
             if _led_via_memory(led.channel, led.mode, colors, led.speed, led.direction, indent):
                 failures += 1
             continue
+        if gpu_mod.is_gpu(led.channel):
+            if dry_run:
+                print(f"{indent}would set {led.channel}  {led.mode}{_fmt_colors(colors)}")
+                continue
+            if _led_via_gpu(led.channel, led.mode, colors, led.speed, led.direction, indent):
+                failures += 1
+            continue
 
         target = target_mod.resolve(found, led.channel, "led")
         if dry_run:
@@ -721,6 +792,38 @@ def cmd_daemon(args) -> int:
 
     runner = daemon_mod.Daemon(config=config, profile=profile, dry_run=args.dry_run)
     return runner.run()
+
+
+def _print_clock_finding(result) -> None:
+    """Say what the CPU did with the cooling, when temperature cannot.
+
+    A CPU pinned at its thermal limit reads the same temperature at any pump or
+    fan speed, and spends the difference on clock instead. That is the number
+    worth reading then -- most often for the pump, which moves heat off the die
+    rather than out of the loop.
+    """
+    slow, fast = result.hot_slow, result.hot_fast
+    if slow is None or fast is None or slow.duty == fast.duty:
+        return
+    if None in (slow.cpu, fast.cpu, slow.mhz, fast.mhz):
+        return
+    gained = fast.mhz - slow.mhz
+    pct = 100.0 * gained / slow.mhz if slow.mhz else 0.0
+    print(
+        _style(
+            f"\n  At {fast.duty}% versus {slow.duty}%: CPU {fast.cpu - slow.cpu:+.1f}C, "
+            f"clock {gained:+.0f} MHz ({pct:+.1f}%).",
+            DIM,
+        )
+    )
+    if abs(fast.cpu - slow.cpu) < 0.5:
+        print(
+            _style(
+                "  CPU temperature held still, so it was at its thermal limit; the clock\n"
+                "  change is what the extra cooling bought.",
+                DIM,
+            )
+        )
 
 
 def cmd_calibrate(args) -> int:
@@ -805,6 +908,8 @@ def cmd_calibrate(args) -> int:
             bits.append(f"{sample.duty:3d}%")
         if sample.rpm is not None:
             bits.append(f"{sample.rpm:5.0f} rpm")
+        if sample.mhz is not None:
+            bits.append(f"{sample.mhz:5.0f} MHz")
         print("  ".join(bits), flush=True)
 
     def note(message) -> None:
@@ -856,8 +961,14 @@ def cmd_calibrate(args) -> int:
     print(f"  idle            {result.idle:5.1f} C")
     for plateau in result.plateaus:
         suffix = "" if plateau.settled else "  (still climbing)"
-        print(f"  load at {plateau.duty:3d}%     {plateau.temp:5.1f} C{suffix}")
+        extra = ""
+        if plateau.cpu is not None:
+            extra += f"   cpu {plateau.cpu:5.1f} C"
+        if plateau.mhz is not None:
+            extra += f"   {plateau.mhz:5.0f} MHz"
+        print(f"  load at {plateau.duty:3d}%     {plateau.temp:5.1f} C{extra}{suffix}")
     print(f"  peak            {result.peak:5.1f} C")
+    _print_clock_finding(result)
 
     hot, cold = result.hot_slow, result.hot_fast
     if hot is not None and cold is not None and result.conclusive:

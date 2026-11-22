@@ -11,6 +11,7 @@ disappearing and coming back.
 
 from __future__ import annotations
 
+import ctypes
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,20 +82,80 @@ def _find_cpu() -> Path | None:
     return None
 
 
-def _find_gpu() -> Path | None:
-    """Prefer the discrete card over an iGPU.
+def _amdgpu_temp(directory: Path) -> Path | None:
+    path = _labelled_input(directory, "edge") or (directory / "temp1_input")
+    return path if path.exists() else None
 
-    Both register as `amdgpu`. Only discrete cards expose a `junction`
-    (hotspot) sensor, which makes it a reliable discriminator -- picking the
-    first amdgpu would follow the iGPU on this machine.
+
+def _find_discrete_amdgpu() -> Path | None:
+    """A discrete AMD card's edge sensor.
+
+    Discrete cards and the iGPU both register as `amdgpu`. Only discrete cards
+    expose a `junction` (hotspot) sensor, which makes it a reliable
+    discriminator.
     """
-    candidates = _hwmon_dirs("amdgpu")
-    discrete = [d for d in candidates if _labelled_input(d, "junction")]
-    for directory in discrete + candidates:
-        path = _labelled_input(directory, "edge") or (directory / "temp1_input")
-        if path.exists():
+    for directory in _hwmon_dirs("amdgpu"):
+        if _labelled_input(directory, "junction"):
+            path = _amdgpu_temp(directory)
+            if path:
+                return path
+    return None
+
+
+def _find_any_amdgpu() -> Path | None:
+    """Last resort: an iGPU, for a machine that has nothing else to follow."""
+    for directory in _hwmon_dirs("amdgpu"):
+        path = _amdgpu_temp(directory)
+        if path:
             return path
     return None
+
+
+class _Nvml:
+    """NVIDIA GPU temperature through NVML, loaded with ctypes.
+
+    The proprietary driver registers no hwmon device, so an RTX 5090 is
+    invisible to everything above -- and before this existed, 'gpu' quietly
+    resolved to the Ryzen iGPU's amdgpu sensor instead, which tracks nothing a
+    case fan can affect. libnvidia-ml ships with the driver and needs no
+    privilege to read temperatures, so it is loaded directly rather than adding
+    a Python binding or shelling out to nvidia-smi every poll.
+
+    NVML enumerates in PCI bus order, so index 0 is the same card every boot.
+    """
+
+    _TEMPERATURE_GPU = 0  # NVML_TEMPERATURE_GPU: the die sensor
+
+    def __init__(self) -> None:
+        self.name: str | None = None
+        self._lib = None
+        self._handle = ctypes.c_void_p()
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() != 0:
+                return
+            if lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(self._handle)) != 0:
+                return
+            buf = ctypes.create_string_buffer(96)
+            if lib.nvmlDeviceGetName(self._handle, buf, len(buf)) == 0:
+                self.name = buf.value.decode(errors="replace")
+            self._lib = lib
+        except (OSError, AttributeError):
+            # No driver, or a library without these symbols: no NVIDIA source.
+            self._lib = None
+
+    @property
+    def available(self) -> bool:
+        return self._lib is not None
+
+    def read(self) -> float | None:
+        if self._lib is None:
+            return None
+        value = ctypes.c_uint()
+        rc = self._lib.nvmlDeviceGetTemperature(
+            self._handle, self._TEMPERATURE_GPU, ctypes.byref(value)
+        )
+        return float(value.value) if rc == 0 else None
 
 
 @dataclass
@@ -103,6 +164,7 @@ class Sources:
 
     device_reader: Callable[[], float | None] | None = None
     _paths: dict[str, Path | None] = field(default_factory=dict)
+    _nvml: _Nvml | None = None
 
     def _sysfs(self, key: str, finder) -> float | None:
         if key not in self._paths:
@@ -128,7 +190,15 @@ class Sources:
         return self._sysfs("cpu", _find_cpu)
 
     def gpu(self) -> float | None:
-        return self._sysfs("gpu", _find_gpu)
+        """The discrete card: AMD over hwmon, else NVIDIA over NVML, else an iGPU."""
+        value = self._sysfs("gpu", _find_discrete_amdgpu)
+        if value is not None or self._paths.get("gpu") is not None:
+            return value
+        if self._nvml is None:
+            self._nvml = _Nvml()
+        if self._nvml.available:
+            return self._nvml.read()
+        return self._sysfs("igpu", _find_any_amdgpu)
 
     def liquid(self) -> float | None:
         if self.device_reader is None:
@@ -162,8 +232,12 @@ class Sources:
         self.cpu()
         self.gpu()
         out = {}
-        for key in ("cpu", "gpu"):
-            path = self._paths.get(key)
-            out[key] = str(path) if path else "unavailable"
+        path = self._paths.get("cpu")
+        out["cpu"] = str(path) if path else "unavailable"
+        gpu_path = self._paths.get("gpu") or self._paths.get("igpu")
+        if self._paths.get("gpu") is None and self._nvml is not None and self._nvml.available:
+            out["gpu"] = f"nvml ({self._nvml.name or 'device 0'})"
+        else:
+            out["gpu"] = str(gpu_path) if gpu_path else "unavailable"
         out["liquid"] = "device" if self.device_reader else "unavailable"
         return out

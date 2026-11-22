@@ -50,6 +50,8 @@ from . import caps as caps_mod
 from . import config as cfg_mod
 from . import curves as curve_mod
 from . import devices as dev_mod
+from . import gpu as gpu_mod
+from . import memory as mem_mod
 from . import render as render_mod
 from . import targets as target_mod
 from . import temps as temp_mod
@@ -77,6 +79,13 @@ _REASSERT_TICKS = 60
 # stalled, which is worth ramping hard for even though nothing is left to notice.
 _NORMAL_LIQUID = 38
 _EMERGENCY_LIQUID = 45
+
+# Ticks to keep retrying OpenRGB-backed lighting that failed at startup. The
+# unit orders us After= the OpenRGB server, but its SDK port opens before device
+# detection finishes: OpenRGB 1.1 here took ~3s to list the Kraken, and a ring
+# lookup in that window found nothing and was never tried again. At the default
+# 2s interval this covers a minute, which outlasts detection comfortably.
+_OPENRGB_RETRY_TICKS = 30
 
 
 def failsafe_curve(duty: int) -> list[tuple[int, int]]:
@@ -127,6 +136,8 @@ class Daemon:
     _pushed_frame: bool = False
     _ticks: int = 0
     _display: list[DisplaySpec] = field(default_factory=list)
+    _openrgb_retry: cfg_mod.Profile | None = None
+    _openrgb_retries_left: int = 0
 
     # ------------------------------------------------------------------
 
@@ -281,7 +292,7 @@ class Daemon:
 
         from .cli import apply_static_profile
 
-        _, skipped = apply_static_profile(
+        failures, skipped = apply_static_profile(
             self.devices,
             self.profile,
             dry_run=self.dry_run,
@@ -294,6 +305,49 @@ class Daemon:
         sys.stdout.flush()
         for note in skipped:
             _LOGGER.debug("not applied statically: %s", note)
+
+        retry = self._openrgb_leds() if failures else []
+        if retry:
+            self._openrgb_retry = cfg_mod.Profile(name=self.profile.name, leds=retry)
+            self._openrgb_retries_left = _OPENRGB_RETRY_TICKS
+            _LOGGER.info("will retry %d OpenRGB lighting target(s) while it detects", len(retry))
+        else:
+            self._openrgb_retry = None
+
+    def _openrgb_leds(self) -> list[cfg_mod.LedSetting]:
+        """The profile's lighting that goes through OpenRGB rather than liquidctl."""
+        out = []
+        for led in self.profile.leds:
+            if mem_mod.is_memory(led.channel) or gpu_mod.is_gpu(led.channel):
+                out.append(led)
+                continue
+            try:
+                target = target_mod.resolve(self.devices, led.channel, "led")
+            except Exception:
+                continue
+            if target.caps.backend_for_color(target.channel) is caps_mod.Backend.OPENRGB:
+                out.append(led)
+        return out
+
+    def _retry_openrgb(self) -> None:
+        """Re-send OpenRGB lighting that failed at startup, until it lands or we give up."""
+        import sys
+
+        from .cli import apply_static_profile
+
+        if self._openrgb_retry is None:
+            return
+        self._openrgb_retries_left -= 1
+        failures, _ = apply_static_profile(
+            self.devices, self._openrgb_retry, dry_run=self.dry_run, indent="  "
+        )
+        sys.stdout.flush()
+        if not failures:
+            _LOGGER.info("OpenRGB lighting applied on retry")
+            self._openrgb_retry = None
+        elif self._openrgb_retries_left <= 0:
+            _LOGGER.error("OpenRGB lighting still failing; giving up until the next resume")
+            self._openrgb_retry = None
 
     def _manage(self, setting, target) -> None:
         """Schedule a curve here, unless the device can run it itself.
@@ -463,6 +517,11 @@ class Daemon:
                 self.tick(force=resumed)
             except Exception as exc:
                 _LOGGER.error("tick failed: %s", exc)
+
+            try:
+                self._retry_openrgb()
+            except Exception as exc:
+                _LOGGER.error("OpenRGB retry failed: %s", exc)
 
         self.shutdown()
         return 0

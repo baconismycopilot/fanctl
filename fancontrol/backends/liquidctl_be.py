@@ -13,6 +13,7 @@ caps.py so a breaking upgrade has a small blast radius.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,10 +42,41 @@ class Reading:
         return self.unit == "rpm" and self.value == 0
 
 
+def _detach_readonly_hwmon(handle) -> None:
+    """Make liquidctl talk HID directly when the kernel driver's sysfs is root-only.
+
+    With nzxt_kraken3 bound, liquidctl routes duty writes through hwmon sysfs
+    instead of hidraw. Those attributes are root-owned (pwm1 0644, the
+    temp1_auto_point*_pwm curve points 0200), so every write fails with EACCES,
+    and initialize() skips the device entirely, assuming the kernel already
+    did it. hidraw is covered by uaccess, so dropping the hwmon handle makes
+    liquidctl take its own direct path, which is the same one it uses for
+    devices with no kernel driver at all.
+    """
+    hwmon = getattr(handle, "_hwmon", None)
+    if hwmon is not None and not os.access(hwmon.path / "pwm1", os.W_OK):
+        handle._hwmon = None
+
+
+# The Control Hub addresses LED channels by bitmask, one bit per channel.
+# liquidctl 1.16.0 ships {0x02, 0x04, 0x06, 0x08, 0x10}, which agrees only at
+# led4 and led5: a write to led2 lands on channel 3, so an F240 RGB Core on
+# led2 never lit while the F360 on led4 did. Sending red with 0x02 lit the
+# F240, confirmed by eye on this hub.
+_HUB_CHANNEL_BYTES = {0: 0x01, 1: 0x02, 2: 0x04, 3: 0x08, 4: 0x10}
+
+
+def _fix_hub_channel_bytes(handle) -> None:
+    if type(handle).__name__ == "ControlHub" and hasattr(handle, "_CHANNEL_BYTE_MAP"):
+        handle._CHANNEL_BYTE_MAP = _HUB_CHANNEL_BYTES
+
+
 @contextmanager
 def opened(device):
     """Connect a device for the duration of a block, serialised by its lock."""
     with device_lock(device.serial):
+        _detach_readonly_hwmon(device.handle)
+        _fix_hub_channel_bytes(device.handle)
         device.handle.connect()
         try:
             yield device.handle

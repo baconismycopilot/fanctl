@@ -164,3 +164,37 @@ def test_calibrate_parses():
     args = build_parser().parse_args(["calibrate", "hub:2", "--no-manage-daemon"])
     assert args.manage_daemon is False
     assert args.curve_max_duty == 100
+
+
+# ------------------------------------------------------------------ clocks
+#
+# A CPU at its thermal limit reads the same temperature at any pump speed: the
+# 9800X3D here held 95.2C, sd 0.00, at both 30% and 100% pump. The extra cooling
+# goes into clock instead, so clock is recorded as the witness.
+
+
+def test_cpu_clock_is_the_mean_across_cores(tmp_path, monkeypatch):
+    for core, khz in enumerate([4_100_000, 4_200_000, 4_300_000]):
+        d = tmp_path / f"cpu{core}" / "cpufreq"
+        d.mkdir(parents=True)
+        (d / "scaling_cur_freq").write_text(f"{khz}\n")
+    (tmp_path / "cpufreq").mkdir()  # the policy directory is not a core
+    monkeypatch.setattr(cal, "CPUFREQ_ROOT", tmp_path)
+    assert cal._cpu_mhz() == pytest.approx(4200.0)
+
+
+def test_cpu_clock_is_none_without_cpufreq(tmp_path, monkeypatch):
+    monkeypatch.setattr(cal, "CPUFREQ_ROOT", tmp_path)
+    assert cal._cpu_mhz() is None
+
+
+def test_csv_carries_the_clock(tmp_path):
+    run = result([])
+    run.samples = [
+        cal.Sample(elapsed=0, phase="load-slow", cpu=95.2, liquid=37.6, duty=30, rpm=1705, mhz=4987)
+    ]
+    path = tmp_path / "run.csv"
+    cal.write_csv(run, str(path))
+    header, row = path.read_text().splitlines()
+    assert header.endswith(",mhz")
+    assert row.endswith(",4987")
